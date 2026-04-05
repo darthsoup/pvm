@@ -1,0 +1,21 @@
+[package]
+name = "pvm"
+version = "0.1.0"
+edition = "2021"
+description = "PHP Version Manager — cross-platform PHP switcher inspired by NVM"
+repository = "https://github.com/your-user/pvm"
+license = "MIT"
+
+[[bin]]
+name = "pvm"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+colored = "2"
+which = "6"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
