@@ -14,6 +14,7 @@ pub struct SwitchOptions {
     pub verbose: bool,
     pub update_apache: bool,
     pub silent: bool,
+    pub silent_if_unchanged: bool,
 }
 
 pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
@@ -39,7 +40,7 @@ pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
     })?;
 
     if target.active {
-        if !opts.silent {
+        if !opts.silent && !opts.silent_if_unchanged {
             println!(
                 "Already using PHP {} ({})",
                 target.version,

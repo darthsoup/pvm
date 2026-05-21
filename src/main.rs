@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, ShellChoice};
 
 fn main() {
     if let Err(e) = run() {
@@ -49,9 +49,10 @@ fn run() -> Result<()> {
         Some(Commands::Pin { version }) => cmd_pin(version.as_deref()),
         Some(Commands::Auto {
             silent,
+            silent_if_unchanged,
             no_restart,
             skip,
-        }) => cmd_auto(silent, no_restart, &skip),
+        }) => cmd_auto(silent, silent_if_unchanged, no_restart, &skip),
         Some(Commands::Exec { version, args }) => cmd_exec(&version, &args),
         Some(Commands::Run {
             version,
@@ -61,7 +62,8 @@ fn run() -> Result<()> {
         Some(Commands::Info { version }) => cmd_info(&version),
         Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Restart { server }) => cmd_restart(server.as_deref()),
-        Some(Commands::Init) => cmd_init(),
+        Some(Commands::Init { shell }) => cmd_init(shell),
+        Some(Commands::Completions { shell }) => cmd_completions(shell),
     }
 }
 
@@ -193,6 +195,7 @@ fn cmd_use(version: Option<&str>, no_restart: bool, skip: &[String]) -> Result<(
         verbose: false,
         update_apache: true,
         silent: false,
+        silent_if_unchanged: false,
     };
 
     match version {
@@ -302,14 +305,14 @@ fn cmd_pin(version: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_auto(silent: bool, no_restart: bool, skip: &[String]) -> Result<()> {
+fn cmd_auto(silent: bool, silent_if_unchanged: bool, no_restart: bool, skip: &[String]) -> Result<()> {
     let cwd = std::env::current_dir().context("Cannot determine current directory")?;
 
     let pvmrc_path = pvmrc::find_pvmrc(&cwd);
 
     match pvmrc_path {
         None => {
-            if !silent {
+            if !silent && !silent_if_unchanged {
                 println!(
                     "{}",
                     "No .pvmrc found in this directory or any parent.".dimmed()
@@ -320,7 +323,7 @@ fn cmd_auto(silent: bool, no_restart: bool, skip: &[String]) -> Result<()> {
         Some(path) => {
             let version_str = pvmrc::read_pvmrc(&path)?;
             if version_str.is_empty() {
-                if !silent {
+                if !silent && !silent_if_unchanged {
                     println!("{}", "Empty .pvmrc — nothing to do.".dimmed());
                 }
                 return Ok(());
@@ -330,8 +333,9 @@ fn cmd_auto(silent: bool, no_restart: bool, skip: &[String]) -> Result<()> {
                 no_restart,
                 skip: skip.to_vec(),
                 verbose: false,
-                update_apache: false, // Avoid Apache changes on every cd
+                update_apache: false,
                 silent,
+                silent_if_unchanged,
             };
 
             switcher::switch_version(&version_str, &opts)
@@ -562,10 +566,17 @@ fn cmd_doctor() -> Result<()> {
                     }
                 }
             }
+            if !found {
+                let fish_conf = home.join(".config/fish/conf.d/pvm.fish");
+                if fish_conf.exists() {
+                    check_ok("Shell integration found in ~/.config/fish/conf.d/pvm.fish");
+                    found = true;
+                }
+            }
         }
         if !found {
             check_warn(
-                "Shell integration not detected — add 'eval \"$(pvm init)\"' to your .zshrc or .bashrc",
+                "Shell integration not detected — add 'eval \"$(pvm init)\"' to your .zshrc/.bashrc, or run 'pvm init --shell fish | source' for fish",
             );
         }
     }
@@ -615,22 +626,68 @@ fn cmd_restart(server: Option<&str>) -> Result<()> {
     }
 }
 
-fn cmd_init() -> Result<()> {
-    let shell = std::env::var("SHELL").unwrap_or_default();
+fn cmd_init(shell: Option<ShellChoice>) -> Result<()> {
+    let chosen = shell.or_else(|| {
+        let s = std::env::var("SHELL").unwrap_or_default();
+        if s.contains("zsh") {
+            Some(ShellChoice::Zsh)
+        } else if s.contains("bash") {
+            Some(ShellChoice::Bash)
+        } else if s.contains("fish") {
+            Some(ShellChoice::Fish)
+        } else {
+            None
+        }
+    });
 
-    if shell.contains("zsh") {
-        print_zsh_hook();
-    } else if shell.contains("bash") {
-        print_bash_hook();
-    } else {
-
-        print_zsh_hook();
-        println!();
-        println!("# --- Bash hook (use the above if you use zsh) ---");
-        println!();
-        print_bash_hook();
+    match chosen {
+        Some(ShellChoice::Zsh) => print_zsh_hook(),
+        Some(ShellChoice::Bash) => print_bash_hook(),
+        Some(ShellChoice::Fish) => print_fish_hook(),
+        None => {
+            eprintln!(
+                "{} Could not detect shell. Pass --shell bash|zsh|fish explicitly.",
+                "warning:".yellow().bold()
+            );
+            print_zsh_hook();
+            println!();
+            println!("# --- Bash hook ---");
+            println!();
+            print_bash_hook();
+        }
     }
 
+    Ok(())
+}
+
+fn cmd_completions(shell: Option<ShellChoice>) -> Result<()> {
+    use clap::CommandFactory;
+    use clap_complete::{generate, Shell as ClapShell};
+
+    let chosen = shell.or_else(|| {
+        let s = std::env::var("SHELL").unwrap_or_default();
+        if s.contains("zsh") {
+            Some(ShellChoice::Zsh)
+        } else if s.contains("bash") {
+            Some(ShellChoice::Bash)
+        } else if s.contains("fish") {
+            Some(ShellChoice::Fish)
+        } else {
+            None
+        }
+    });
+
+    let clap_shell = match chosen {
+        Some(ShellChoice::Bash) => ClapShell::Bash,
+        Some(ShellChoice::Zsh) => ClapShell::Zsh,
+        Some(ShellChoice::Fish) => ClapShell::Fish,
+        None => anyhow::bail!(
+            "Could not detect shell. Pass --shell bash|zsh|fish explicitly."
+        ),
+    };
+
+    let mut cmd = Cli::command();
+    generate(clap_shell, &mut cmd, "pvm", &mut std::io::stdout());
     Ok(())
 }
 
@@ -644,7 +701,7 @@ autoload -U add-zsh-hook
 
 _pvm_auto_switch() {{
   if command -v pvm &>/dev/null; then
-    pvm auto --silent 2>/dev/null
+    pvm auto --silent-if-unchanged 2>/dev/null
   fi
 }}
 
@@ -661,7 +718,7 @@ fn print_bash_hook() {
 
 _pvm_auto_switch() {{
   if command -v pvm &>/dev/null; then
-    pvm auto --silent 2>/dev/null
+    pvm auto --silent-if-unchanged 2>/dev/null
   fi
 }}
 
@@ -671,5 +728,21 @@ else
   PROMPT_COMMAND="_pvm_auto_switch;$PROMPT_COMMAND"
 fi
 _pvm_auto_switch  # run once on shell start"#
+    );
+}
+
+fn print_fish_hook() {
+    println!(
+        r#"# pvm shell integration (fish)
+# Save this to ~/.config/fish/conf.d/pvm.fish
+# or run: pvm init --shell fish | source
+
+function _pvm_auto_switch --on-variable PWD
+    if command -v pvm > /dev/null 2>&1
+        pvm auto --silent-if-unchanged ^ /dev/null
+    end
+end
+
+_pvm_auto_switch"#
     );
 }

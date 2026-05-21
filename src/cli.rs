@@ -1,4 +1,11 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(ValueEnum, Clone, Debug)]
+pub enum ShellChoice {
+    Bash,
+    Zsh,
+    Fish,
+}
 
 #[derive(Parser)]
 #[command(
@@ -76,6 +83,10 @@ pub enum Commands {
         #[arg(long)]
         silent: bool,
 
+        /// Suppress output only when PHP version is already correct (better for cd hooks)
+        #[arg(long)]
+        silent_if_unchanged: bool,
+
         /// Skip web server restart
         #[arg(long)]
         no_restart: bool,
@@ -127,5 +138,18 @@ pub enum Commands {
     },
 
     /// Print shell integration script (add: eval "$(pvm init)" to .zshrc/.bashrc)
-    Init,
+    Init {
+        /// Shell to generate integration for (auto-detected from $SHELL if not given)
+        #[arg(long, value_enum)]
+        shell: Option<ShellChoice>,
+    },
+
+    /// Print shell completions to stdout
+    ///
+    /// Example: pvm completions --shell zsh > ~/.zsh/completions/_pvm
+    Completions {
+        /// Shell to generate completions for
+        #[arg(long, value_enum)]
+        shell: Option<ShellChoice>,
+    },
 }
