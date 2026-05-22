@@ -11,7 +11,6 @@ use crate::webserver::{handle_post_switch_restart, update_apache_config, Restart
 pub struct SwitchOptions {
     pub no_restart: bool,
     pub skip: Vec<String>,
-    pub verbose: bool,
     pub update_apache: bool,
     pub silent: bool,
     pub silent_if_unchanged: bool,
@@ -75,7 +74,7 @@ pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn do_switch(target: &PhpVersion, all_versions: &[PhpVersion], opts: &SwitchOptions) -> Result<()> {
+fn do_switch(target: &PhpVersion, all_versions: &[PhpVersion], _opts: &SwitchOptions) -> Result<()> {
     if which::which("brew").is_ok() {
         for v in all_versions {
             if v.version != target.version {
@@ -104,10 +103,6 @@ fn do_switch(target: &PhpVersion, all_versions: &[PhpVersion], opts: &SwitchOpti
 
         if status2.status.success() {
             return Ok(());
-        }
-
-        if opts.verbose {
-            eprintln!("brew link did not succeed cleanly, falling back to direct symlink");
         }
     }
 

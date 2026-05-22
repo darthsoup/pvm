@@ -188,7 +188,6 @@ fn cmd_use(version: Option<&str>, no_restart: bool, skip: &[String]) -> Result<(
     let opts = switcher::SwitchOptions {
         no_restart,
         skip: skip.to_vec(),
-        verbose: false,
         update_apache: true,
         silent: false,
         silent_if_unchanged: false,
@@ -325,7 +324,6 @@ fn cmd_auto(
             let opts = switcher::SwitchOptions {
                 no_restart,
                 skip: skip.to_vec(),
-                verbose: false,
                 update_apache: false,
                 silent,
                 silent_if_unchanged,
