@@ -77,7 +77,7 @@ pub enum Commands {
         version: Option<String>,
     },
 
-    /// Read .pvmrc from cwd or parent directories and switch to that version
+    /// Read .pvmrc, .php-version, or .pvm from cwd or parent directories and switch to that version
     Auto {
         /// Suppress all output (used by shell hook)
         #[arg(long)]

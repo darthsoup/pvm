@@ -94,8 +94,7 @@ fn cmd_list() -> Result<()> {
             .iter()
             .filter(|(_, ver)| {
                 let resolved = aliases::resolve_version_or_alias(ver, &aliases);
-                detector::normalize_version_str(&resolved) == v.version
-                    || ver.as_str() == v.version
+                detector::normalize_version_str(&resolved) == v.version || ver.as_str() == v.version
             })
             .map(|(name, _)| format!("[{}]", name).dimmed().to_string())
             .collect();
@@ -149,7 +148,6 @@ fn cmd_current() -> Result<()> {
             active.binary_path.display()
         );
     } else if let Ok(php_path) = which::which("php") {
-
         println!("{}", php_path.display());
     } else {
         println!("{}", "No active PHP version found.".yellow());
@@ -162,9 +160,7 @@ fn cmd_current() -> Result<()> {
 fn cmd_which(version: Option<&str>) -> Result<()> {
     match version {
         None => {
-
-            let path = which::which("php")
-                .map_err(|_| anyhow::anyhow!("php not found in PATH"))?;
+            let path = which::which("php").map_err(|_| anyhow::anyhow!("php not found in PATH"))?;
             println!("{}", path.display());
         }
         Some(v) => {
@@ -201,7 +197,6 @@ fn cmd_use(version: Option<&str>, no_restart: bool, skip: &[String]) -> Result<(
     match version {
         Some(v) => switcher::switch_version(v, &opts),
         None => {
-
             let versions = detector::detect_php_versions();
             if versions.is_empty() {
                 anyhow::bail!(
@@ -222,10 +217,8 @@ fn cmd_use(version: Option<&str>, no_restart: bool, skip: &[String]) -> Result<(
                 })
                 .collect();
 
-            let idx =
-                utils::prompt_pick(&labels, "Enter number or version").ok_or_else(|| {
-                    anyhow::anyhow!("No version selected")
-                })?;
+            let idx = utils::prompt_pick(&labels, "Enter number or version")
+                .ok_or_else(|| anyhow::anyhow!("No version selected"))?;
 
             let selected = &versions[idx];
             switcher::switch_version(&selected.version, &opts)
@@ -236,7 +229,6 @@ fn cmd_use(version: Option<&str>, no_restart: bool, skip: &[String]) -> Result<(
 fn cmd_alias(name: Option<&str>, version: Option<&str>) -> Result<()> {
     match (name, version) {
         (None, _) => {
-
             let aliases = aliases::load_aliases()?;
             if aliases.is_empty() {
                 println!("{}", "No aliases defined.".dimmed());
@@ -252,7 +244,6 @@ fn cmd_alias(name: Option<&str>, version: Option<&str>) -> Result<()> {
             Ok(())
         }
         (Some(n), None) => {
-
             let aliases = aliases::load_aliases()?;
             match aliases.get(n) {
                 Some(v) => println!("{} → {}", n.cyan().bold(), v),
@@ -262,12 +253,7 @@ fn cmd_alias(name: Option<&str>, version: Option<&str>) -> Result<()> {
         }
         (Some(n), Some(v)) => {
             aliases::set_alias(n, v)?;
-            println!(
-                "{} Alias {} → {}",
-                "✓".green(),
-                n.cyan().bold(),
-                v.bold()
-            );
+            println!("{} Alias {} → {}", "✓".green(), n.cyan().bold(), v.bold());
             Ok(())
         }
     }
@@ -283,7 +269,6 @@ fn cmd_pin(version: Option<&str>) -> Result<()> {
     let pin_version = match version {
         Some(v) => v.to_string(),
         None => {
-
             let versions = detector::detect_php_versions();
             let active = detector::get_active_version(&versions).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -305,7 +290,12 @@ fn cmd_pin(version: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_auto(silent: bool, silent_if_unchanged: bool, no_restart: bool, skip: &[String]) -> Result<()> {
+fn cmd_auto(
+    silent: bool,
+    silent_if_unchanged: bool,
+    no_restart: bool,
+    skip: &[String],
+) -> Result<()> {
     let cwd = std::env::current_dir().context("Cannot determine current directory")?;
 
     let pvmrc_path = pvmrc::find_pvmrc(&cwd);
@@ -315,7 +305,7 @@ fn cmd_auto(silent: bool, silent_if_unchanged: bool, no_restart: bool, skip: &[S
             if !silent && !silent_if_unchanged {
                 println!(
                     "{}",
-                    "No .pvmrc found in this directory or any parent.".dimmed()
+                    "No version file (.pvmrc, .php-version, .pvm) found in this directory or any parent.".dimmed()
                 );
             }
             Ok(())
@@ -324,7 +314,10 @@ fn cmd_auto(silent: bool, silent_if_unchanged: bool, no_restart: bool, skip: &[S
             let version_str = pvmrc::read_pvmrc(&path)?;
             if version_str.is_empty() {
                 if !silent && !silent_if_unchanged {
-                    println!("{}", "Empty .pvmrc — nothing to do.".dimmed());
+                    println!(
+                        "{}",
+                        format!("Empty {} — nothing to do.", path.display()).dimmed()
+                    );
                 }
                 return Ok(());
             }
@@ -366,8 +359,8 @@ fn cmd_info(version_str: &str) -> Result<()> {
         )
     })?;
 
-    let build_date = detector::get_build_date(&target.binary_path)
-        .unwrap_or_else(|| "unknown".to_string());
+    let build_date =
+        detector::get_build_date(&target.binary_path).unwrap_or_else(|| "unknown".to_string());
     let modules = detector::get_loaded_modules(&target.binary_path);
 
     let alias_names: Vec<String> = aliases
@@ -387,7 +380,11 @@ fn cmd_info(version_str: &str) -> Result<()> {
 
     println!("{}", target.full_version.bold());
     utils::horizontal_rule();
-    println!("  {:12} {}", "Binary:".dimmed(), target.binary_path.display());
+    println!(
+        "  {:12} {}",
+        "Binary:".dimmed(),
+        target.binary_path.display()
+    );
     if let Some(ref ini) = target.ini_path {
         println!("  {:12} {}", "php.ini:".dimmed(), ini);
     }
@@ -397,17 +394,18 @@ fn cmd_info(version_str: &str) -> Result<()> {
     println!("  {:12} {}", "Build date:".dimmed(), build_date);
     println!("  {:12} {}", "Status:".dimmed(), status_str);
     if !alias_names.is_empty() {
-        println!("  {:12} {}", "Alias:".dimmed(), alias_names.join(", ").cyan());
+        println!(
+            "  {:12} {}",
+            "Alias:".dimmed(),
+            alias_names.join(", ").cyan()
+        );
     }
     utils::horizontal_rule();
 
     if modules.is_empty() {
         println!("{}", "Could not retrieve loaded modules.".dimmed());
     } else {
-        println!(
-            "{}",
-            format!("Loaded modules ({}):", modules.len()).bold()
-        );
+        println!("{}", format!("Loaded modules ({}):", modules.len()).bold());
         println!("  {}", modules.join(", ").dimmed());
     }
 
@@ -426,8 +424,7 @@ fn cmd_doctor() -> Result<()> {
             check_ok(&format!("php found in PATH: {}", path.display()));
 
             if let Some(av) = active {
-                let path_canon = std::fs::canonicalize(&path)
-                    .unwrap_or_else(|_| path.clone());
+                let path_canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
                 let bin_canon = std::fs::canonicalize(&av.binary_path)
                     .unwrap_or_else(|_| av.binary_path.clone());
                 if path_canon == bin_canon {
@@ -481,7 +478,9 @@ fn cmd_doctor() -> Result<()> {
                 .filter(|e| {
                     let name = e.file_name();
                     let n = name.to_string_lossy();
-                    (n == "php" || n.starts_with("php")) && e.path().is_symlink() && !e.path().exists()
+                    (n == "php" || n.starts_with("php"))
+                        && e.path().is_symlink()
+                        && !e.path().exists()
                 })
                 .map(|e| e.path())
                 .collect();
@@ -502,7 +501,11 @@ fn cmd_doctor() -> Result<()> {
             .split(':')
             .filter_map(|dir| {
                 let p = std::path::Path::new(dir).join("php");
-                if p.exists() { Some(p) } else { None }
+                if p.exists() {
+                    Some(p)
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -528,10 +531,8 @@ fn cmd_doctor() -> Result<()> {
             match output {
                 Ok(o) => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
-                    let php_formulas: Vec<&str> = stdout
-                        .lines()
-                        .filter(|l| l.starts_with("php"))
-                        .collect();
+                    let php_formulas: Vec<&str> =
+                        stdout.lines().filter(|l| l.starts_with("php")).collect();
                     if php_formulas.is_empty() {
                         check_warn("No PHP formulas found in Homebrew");
                     } else {
@@ -556,10 +557,7 @@ fn cmd_doctor() -> Result<()> {
                 if path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if content.contains("pvm init") {
-                            check_ok(&format!(
-                                "Shell integration found in ~/{}",
-                                file
-                            ));
+                            check_ok(&format!("Shell integration found in ~/{}", file));
                             found = true;
                             break;
                         }
@@ -601,12 +599,8 @@ fn cmd_restart(server: Option<&str>) -> Result<()> {
     match server {
         Some("apache") => webserver::restart_server(webserver::WebServer::Apache),
         Some("nginx") => webserver::restart_server(webserver::WebServer::Nginx),
-        Some(other) => anyhow::bail!(
-            "Unknown server '{}'. Use 'apache' or 'nginx'.",
-            other
-        ),
+        Some(other) => anyhow::bail!("Unknown server '{}'. Use 'apache' or 'nginx'.", other),
         None => {
-
             let running = webserver::detect_running_servers();
             if running.is_empty() {
                 let apache = webserver::detect_apache();
@@ -681,9 +675,7 @@ fn cmd_completions(shell: Option<ShellChoice>) -> Result<()> {
         Some(ShellChoice::Bash) => ClapShell::Bash,
         Some(ShellChoice::Zsh) => ClapShell::Zsh,
         Some(ShellChoice::Fish) => ClapShell::Fish,
-        None => anyhow::bail!(
-            "Could not detect shell. Pass --shell bash|zsh|fish explicitly."
-        ),
+        None => anyhow::bail!("Could not detect shell. Pass --shell bash|zsh|fish explicitly."),
     };
 
     let mut cmd = Cli::command();

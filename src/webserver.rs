@@ -133,10 +133,7 @@ pub fn handle_post_switch_restart(opts: &RestartOpts) -> Result<()> {
                 if opts.silent {
                     false // no prompts in shell-hook mode
                 } else {
-                    prompt_yes_no(
-                        &format!("{} is running. Restart it?", server.name()),
-                        true,
-                    )
+                    prompt_yes_no(&format!("{} is running. Restart it?", server.name()), true)
                 }
             }
         };
@@ -216,6 +213,5 @@ fn update_apache_config_file(path: &Path, php_version: &str) -> Result<()> {
     }
 
     let new_content = lines.join("\n");
-    std::fs::write(path, new_content)
-        .with_context(|| format!("Failed to write {}", path.display()))
+    std::fs::write(path, new_content).with_context(|| format!("Failed to write {}", path.display()))
 }

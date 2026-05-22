@@ -24,8 +24,7 @@ pub fn save_aliases(aliases: &Aliases) -> Result<()> {
     let path = aliases_path()?;
     let ordered: std::collections::BTreeMap<_, _> = aliases.iter().collect();
     let content = serde_json::to_string_pretty(&ordered)?;
-    std::fs::write(&path, content)
-        .with_context(|| format!("Failed to write {}", path.display()))
+    std::fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
 }
 
 pub fn set_alias(name: &str, version: &str) -> Result<()> {
@@ -43,5 +42,8 @@ pub fn remove_alias(name: &str) -> Result<()> {
 }
 
 pub fn resolve_version_or_alias(input: &str, aliases: &Aliases) -> String {
-    aliases.get(input).cloned().unwrap_or_else(|| input.to_string())
+    aliases
+        .get(input)
+        .cloned()
+        .unwrap_or_else(|| input.to_string())
 }

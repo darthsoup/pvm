@@ -118,7 +118,9 @@ fn scan_linux_paths() -> Vec<PathBuf> {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str == "php" || (name_str.starts_with("php") && is_php_versioned_name(&name_str)) {
+                if name_str == "php"
+                    || (name_str.starts_with("php") && is_php_versioned_name(&name_str))
+                {
                     let path = entry.path();
                     if path.is_file() || path.is_symlink() {
                         paths.push(path);
@@ -170,8 +172,7 @@ fn scan_path_binaries() -> Vec<PathBuf> {
     }
 
     let known_versions = [
-        "5.6", "7.0", "7.1", "7.2", "7.3", "7.4",
-        "8.0", "8.1", "8.2", "8.3", "8.4",
+        "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4",
     ];
     for ver in &known_versions {
         if let Ok(p) = which::which(format!("php{}", ver)) {
@@ -269,9 +270,10 @@ pub fn find_version<'a>(versions: &'a [PhpVersion], target: &str) -> Option<&'a 
 
 // Accepts: "8.3", "8.3.4", "php8.3", "PHP8.3", "php@8.3"
 pub fn normalize_version_str(s: &str) -> String {
-    let s = s.trim_start_matches("php@")
-             .trim_start_matches("php")
-             .trim_start_matches("PHP");
+    let s = s
+        .trim_start_matches("php@")
+        .trim_start_matches("php")
+        .trim_start_matches("PHP");
     let re = Regex::new(r"(\d+\.\d+)").unwrap();
     if let Some(cap) = re.captures(s) {
         return cap.get(1).unwrap().as_str().to_string();
