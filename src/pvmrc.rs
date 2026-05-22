@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+const VERSION_FILES: &[&str] = &[".pvmrc", ".php-version", ".pvm"];
+
 pub fn find_pvmrc(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     loop {
-        let candidate = current.join(".pvmrc");
-        if candidate.exists() {
-            return Some(candidate);
+        for name in VERSION_FILES {
+            let candidate = current.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
         if !current.pop() {
             break;
