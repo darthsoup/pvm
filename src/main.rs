@@ -691,8 +691,34 @@ fn print_zsh_hook() {
 autoload -U add-zsh-hook
 
 _pvm_auto_switch() {{
-  if command -v pvm &>/dev/null; then
-    pvm auto --silent-if-unchanged 2>/dev/null
+  # Pure-shell directory walk — no subprocess on the hot path
+  local dir="$PWD" wanted="" f
+  while true; do
+    for f in .pvmrc .php-version .pvm; do
+      if [[ -f "$dir/$f" ]]; then
+        IFS= read -r wanted < "$dir/$f"
+        break 2
+      fi
+    done
+    [[ "$dir" == "/" ]] && break
+    dir="${{dir:h}}"
+  done
+
+  wanted="${{wanted//[[:space:]]/}}"
+
+  if [[ -z "$wanted" ]]; then
+    unset PVM_PHP_VERSION
+    return 0
+  fi
+
+  # Skip subprocess entirely if version is already correct
+  [[ "${{PVM_PHP_VERSION-}}" == "$wanted" ]] && return 0
+
+  command -v pvm &>/dev/null || return 0
+  if pvm auto --silent-if-unchanged 2>/dev/null; then
+    export PVM_PHP_VERSION="$wanted"
+  else
+    unset PVM_PHP_VERSION
   fi
 }}
 
@@ -708,12 +734,40 @@ fn print_bash_hook() {
 #   eval "$(pvm init)"
 
 _pvm_auto_switch() {{
-  if command -v pvm &>/dev/null; then
-    pvm auto --silent-if-unchanged 2>/dev/null
+  # Pure-shell directory walk — no subprocess on the hot path
+  local dir="$PWD" wanted="" f found=0
+  while true; do
+    for f in .pvmrc .php-version .pvm; do
+      if [[ -f "$dir/$f" ]]; then
+        IFS= read -r wanted < "$dir/$f"
+        found=1
+        break
+      fi
+    done
+    [[ "$found" -eq 1 || "$dir" == "/" ]] && break
+    dir="${{dir%/*}}"
+    [[ -z "$dir" ]] && dir="/"
+  done
+
+  wanted="${{wanted//[[:space:]]/}}"
+
+  if [[ -z "$wanted" ]]; then
+    unset PVM_PHP_VERSION
+    return 0
+  fi
+
+  # Skip subprocess entirely if version is already correct
+  [[ "${{PVM_PHP_VERSION-}}" == "$wanted" ]] && return 0
+
+  command -v pvm &>/dev/null || return 0
+  if pvm auto --silent-if-unchanged 2>/dev/null; then
+    export PVM_PHP_VERSION="$wanted"
+  else
+    unset PVM_PHP_VERSION
   fi
 }}
 
-if [[ -z "$PROMPT_COMMAND" ]]; then
+if [[ -z "${{PROMPT_COMMAND-}}" ]]; then
   PROMPT_COMMAND="_pvm_auto_switch"
 else
   PROMPT_COMMAND="_pvm_auto_switch;$PROMPT_COMMAND"
@@ -729,9 +783,42 @@ fn print_fish_hook() {
 # or run: pvm init --shell fish | source
 
 function _pvm_auto_switch --on-variable PWD
-    if command -v pvm > /dev/null 2>&1
-        pvm auto --silent-if-unchanged 2>/dev/null
+  # Pure-shell directory walk — no subprocess on the hot path
+  set -l dir $PWD
+  set -l wanted ""
+  while true
+    for f in .pvmrc .php-version .pvm
+      if test -f "$dir/$f"
+        read -l line < "$dir/$f"
+        set wanted (string trim $line)
+        break
+      end
     end
+    if test -n "$wanted"; or test "$dir" = "/"
+      break
+    end
+    set dir (string replace -r '/[^/]*$' '' $dir)
+    if test -z "$dir"
+      set dir "/"
+    end
+  end
+
+  if test -z "$wanted"
+    set -eg PVM_PHP_VERSION
+    return 0
+  end
+
+  # Skip subprocess entirely if version is already correct
+  if set -q PVM_PHP_VERSION; and test "$PVM_PHP_VERSION" = "$wanted"
+    return 0
+  end
+
+  command -v pvm > /dev/null 2>&1 || return 0
+  if pvm auto --silent-if-unchanged 2>/dev/null
+    set -gx PVM_PHP_VERSION $wanted
+  else
+    set -eg PVM_PHP_VERSION
+  end
 end
 
 _pvm_auto_switch"#

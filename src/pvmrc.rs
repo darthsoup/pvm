@@ -8,7 +8,7 @@ pub fn find_pvmrc(start: &Path) -> Option<PathBuf> {
     loop {
         for name in VERSION_FILES {
             let candidate = current.join(name);
-            if candidate.exists() {
+            if candidate.is_file() {
                 return Some(candidate);
             }
         }
