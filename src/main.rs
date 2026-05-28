@@ -729,7 +729,7 @@ fn print_fish_hook() {
 
 function _pvm_auto_switch --on-variable PWD
     if command -v pvm > /dev/null 2>&1
-        pvm auto --silent-if-unchanged ^ /dev/null
+        pvm auto --silent-if-unchanged 2>/dev/null
     end
 end
 
