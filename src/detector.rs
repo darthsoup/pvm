@@ -10,8 +10,6 @@ pub struct PhpVersion {
     pub version: String,
     pub full_version: String,
     pub binary_path: PathBuf,
-    pub ini_path: Option<String>,
-    pub scan_dir: Option<String>,
     pub active: bool,
 }
 
@@ -201,19 +199,15 @@ fn probe_php_binary(binary: &Path) -> Option<PhpVersion> {
     let patch = cap.get(2)?.as_str();
     let full_version = format!("PHP {}.{}", major_minor, patch);
 
-    let (ini_path, scan_dir) = probe_ini(binary);
-
     Some(PhpVersion {
         version: major_minor,
         full_version,
         binary_path: binary.to_path_buf(),
-        ini_path,
-        scan_dir,
         active: false,
     })
 }
 
-fn probe_ini(binary: &Path) -> (Option<String>, Option<String>) {
+pub fn probe_ini(binary: &Path) -> (Option<String>, Option<String>) {
     let output = match Command::new(binary).arg("--ini").output() {
         Ok(o) => o,
         Err(_) => return (None, None),
@@ -300,4 +294,16 @@ pub fn get_loaded_modules(binary: &Path) -> Vec<String> {
         .filter(|l| !l.is_empty() && !l.starts_with('['))
         .map(|l| l.trim().to_string())
         .collect()
+}
+
+/// Quickly returns the active PHP major.minor version and its binary path
+/// by running `php --version` on the `php` found in PATH.
+/// Much cheaper than `detect_php_versions()` — only one subprocess.
+pub fn get_active_php_quick() -> Option<(String, PathBuf)> {
+    let php_path = which::which("php").ok()?;
+    let output = Command::new(&php_path).arg("--version").output().ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let re = Regex::new(r"PHP (\d+\.\d+)").ok()?;
+    let version = re.captures(&stdout)?.get(1)?.as_str().to_string();
+    Some((version, php_path))
 }

@@ -360,6 +360,7 @@ fn cmd_info(version_str: &str) -> Result<()> {
     let build_date =
         detector::get_build_date(&target.binary_path).unwrap_or_else(|| "unknown".to_string());
     let modules = detector::get_loaded_modules(&target.binary_path);
+    let (ini_path, scan_dir) = detector::probe_ini(&target.binary_path);
 
     let alias_names: Vec<String> = aliases
         .iter()
@@ -383,10 +384,10 @@ fn cmd_info(version_str: &str) -> Result<()> {
         "Binary:".dimmed(),
         target.binary_path.display()
     );
-    if let Some(ref ini) = target.ini_path {
+    if let Some(ref ini) = ini_path {
         println!("  {:12} {}", "php.ini:".dimmed(), ini);
     }
-    if let Some(ref scan) = target.scan_dir {
+    if let Some(ref scan) = scan_dir {
         println!("  {:12} {}", "Scan dir:".dimmed(), scan);
     }
     println!("  {:12} {}", "Build date:".dimmed(), build_date);

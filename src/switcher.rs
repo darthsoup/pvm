@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::aliases::{load_aliases, resolve_version_or_alias};
-use crate::detector::{detect_php_versions, find_version, normalize_version_str, PhpVersion};
+use crate::detector::{
+    detect_php_versions, find_version, get_active_php_quick as detect_php_versions_quick,
+    normalize_version_str, PhpVersion,
+};
 use crate::webserver::{handle_post_switch_restart, update_apache_config, RestartOpts};
 
 #[derive(Default)]
@@ -20,6 +23,21 @@ pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
     let aliases = load_aliases()?;
     let resolved = resolve_version_or_alias(version_str, &aliases);
     let normalized = normalize_version_str(&resolved);
+
+    // Fast path: one subprocess instead of N*2. If the active PHP is already
+    // the requested version we can return immediately without full detection.
+    if let Some((current_ver, current_path)) = detect_php_versions_quick() {
+        if current_ver == normalized {
+            if !opts.silent && !opts.silent_if_unchanged {
+                println!(
+                    "Already using PHP {} ({})",
+                    current_ver,
+                    current_path.display()
+                );
+            }
+            return Ok(());
+        }
+    }
 
     let versions = detect_php_versions();
     if versions.is_empty() {
@@ -67,7 +85,7 @@ pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
     handle_post_switch_restart(&RestartOpts {
         no_restart: opts.no_restart,
         skip: &opts.skip,
-        silent: opts.silent,
+        silent: opts.silent || opts.silent_if_unchanged,
     })?;
 
     Ok(())
