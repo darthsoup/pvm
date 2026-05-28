@@ -92,7 +92,11 @@ pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn do_switch(target: &PhpVersion, all_versions: &[PhpVersion], _opts: &SwitchOptions) -> Result<()> {
+fn do_switch(
+    target: &PhpVersion,
+    all_versions: &[PhpVersion],
+    _opts: &SwitchOptions,
+) -> Result<()> {
     if which::which("brew").is_ok() {
         for v in all_versions {
             if v.version != target.version {
@@ -144,6 +148,12 @@ fn do_switch(target: &PhpVersion, _all: &[PhpVersion], _opts: &SwitchOptions) ->
     update_symlink(&target.binary_path)
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn do_switch(_target: &PhpVersion, _all: &[PhpVersion], _opts: &SwitchOptions) -> Result<()> {
+    anyhow::bail!("PHP version switching is not supported on this platform")
+}
+
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn update_symlink(binary_path: &Path) -> Result<()> {
     let candidates = [
         PathBuf::from("/usr/local/bin/php"),
