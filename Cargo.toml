@@ -1,7 +1,7 @@
 [package]
 name = "pvm"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "PHP Version Manager — cross-platform PHP switcher inspired by NVM/fnm"
 repository = "https://github.com/darthsoup/pvm"
 license = "MIT"

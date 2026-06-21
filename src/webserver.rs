@@ -3,7 +3,7 @@ use colored::Colorize;
 use std::path::Path;
 use std::process::Command;
 
-use crate::utils::{is_command_available, prompt_yes_no, Config};
+use crate::utils::{Config, is_command_available, prompt_yes_no};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebServer {

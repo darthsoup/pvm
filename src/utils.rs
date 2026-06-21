@@ -52,10 +52,11 @@ pub fn prompt_pick(items: &[String], label: &str) -> Option<usize> {
     }
 
     let trimmed = input.trim();
-    if let Ok(n) = trimmed.parse::<usize>() {
-        if n >= 1 && n <= items.len() {
-            return Some(n - 1);
-        }
+    if let Ok(n) = trimmed.parse::<usize>()
+        && n >= 1
+        && n <= items.len()
+    {
+        return Some(n - 1);
     }
     items.iter().position(|item| item.starts_with(trimmed))
 }

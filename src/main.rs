@@ -500,11 +500,7 @@ fn cmd_doctor() -> Result<()> {
             .split(':')
             .filter_map(|dir| {
                 let p = std::path::Path::new(dir).join("php");
-                if p.exists() {
-                    Some(p)
-                } else {
-                    None
-                }
+                if p.exists() { Some(p) } else { None }
             })
             .collect();
 
@@ -553,14 +549,13 @@ fn cmd_doctor() -> Result<()> {
         if let Some(home) = &home {
             for file in &shell_files {
                 let path = home.join(file);
-                if path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if content.contains("pvm init") {
-                            check_ok(&format!("Shell integration found in ~/{}", file));
-                            found = true;
-                            break;
-                        }
-                    }
+                if path.exists()
+                    && let Ok(content) = std::fs::read_to_string(&path)
+                    && content.contains("pvm init")
+                {
+                    check_ok(&format!("Shell integration found in ~/{}", file));
+                    found = true;
+                    break;
                 }
             }
             if !found {
@@ -655,7 +650,7 @@ fn cmd_init(shell: Option<ShellChoice>) -> Result<()> {
 
 fn cmd_completions(shell: Option<ShellChoice>) -> Result<()> {
     use clap::CommandFactory;
-    use clap_complete::{generate, Shell as ClapShell};
+    use clap_complete::{Shell as ClapShell, generate};
 
     let chosen = shell.or_else(|| {
         let s = std::env::var("SHELL").unwrap_or_default();

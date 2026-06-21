@@ -5,10 +5,10 @@ use std::process::{Command, Stdio};
 
 use crate::aliases::{load_aliases, resolve_version_or_alias};
 use crate::detector::{
-    detect_php_versions, find_version, get_active_php_quick as detect_php_versions_quick,
-    normalize_version_str, PhpVersion,
+    PhpVersion, detect_php_versions, find_version,
+    get_active_php_quick as detect_php_versions_quick, normalize_version_str,
 };
-use crate::webserver::{handle_post_switch_restart, update_apache_config, RestartOpts};
+use crate::webserver::{RestartOpts, handle_post_switch_restart, update_apache_config};
 
 #[derive(Default)]
 pub struct SwitchOptions {
@@ -26,17 +26,17 @@ pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
 
     // Fast path: one subprocess instead of N*2. If the active PHP is already
     // the requested version we can return immediately without full detection.
-    if let Some((current_ver, current_path)) = detect_php_versions_quick() {
-        if current_ver == normalized {
-            if !opts.silent && !opts.silent_if_unchanged {
-                println!(
-                    "Already using PHP {} ({})",
-                    current_ver,
-                    current_path.display()
-                );
-            }
-            return Ok(());
+    if let Some((current_ver, current_path)) = detect_php_versions_quick()
+        && current_ver == normalized
+    {
+        if !opts.silent && !opts.silent_if_unchanged {
+            println!(
+                "Already using PHP {} ({})",
+                current_ver,
+                current_path.display()
+            );
         }
+        return Ok(());
     }
 
     let versions = detect_php_versions();
@@ -161,18 +161,18 @@ fn update_symlink(binary_path: &Path) -> Result<()> {
     ];
 
     for link in &candidates {
-        if let Some(parent) = link.parent() {
-            if !parent.exists() {
-                continue;
-            }
+        if let Some(parent) = link.parent()
+            && !parent.exists()
+        {
+            continue;
         }
-        if link.exists() || link.is_symlink() {
-            if let Err(e) = std::fs::remove_file(link) {
-                let _ = Command::new("sudo")
-                    .args(["rm", "-f", link.to_str().unwrap_or("")])
-                    .status();
-                let _ = e; // bind to suppress unused-result warning
-            }
+        if (link.exists() || link.is_symlink())
+            && let Err(e) = std::fs::remove_file(link)
+        {
+            let _ = Command::new("sudo")
+                .args(["rm", "-f", link.to_str().unwrap_or("")])
+                .status();
+            let _ = e; // bind to suppress unused-result warning
         }
 
         #[cfg(unix)]
@@ -190,10 +190,10 @@ fn update_symlink(binary_path: &Path) -> Result<()> {
                             link.to_str().unwrap_or(""),
                         ])
                         .status();
-                    if let Ok(s) = status {
-                        if s.success() {
-                            return Ok(());
-                        }
+                    if let Ok(s) = status
+                        && s.success()
+                    {
+                        return Ok(());
                     }
                 }
             }
