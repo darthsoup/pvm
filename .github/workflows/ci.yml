@@ -50,3 +50,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+
+  benchmarks:
+    name: Benchmark checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 -m unittest discover -s benchmarks/tests -v
+      - run: cargo build --locked --release
+      - run: python3 benchmarks/auto_switch.py --iterations 50 --samples 3 --json target/benchmarks.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-${{ matrix.os }}
+          path: target/benchmarks.json
+          if-no-files-found: error
