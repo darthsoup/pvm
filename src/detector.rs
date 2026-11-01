@@ -1,7 +1,30 @@
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
+
+// ── Cached regexes (compiled once on first use) ───────────────────────────────
+
+/// `PHP 8.3.4` → captures "8.3" and "4".
+static PHP_VERSION_FULL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"PHP (\d+\.\d+)\.(\d+)").unwrap());
+/// `PHP 8.3` → captures "8.3".
+static PHP_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"PHP (\d+\.\d+)").unwrap());
+/// Any `8.3`-style major.minor.
+static VERSION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+\.\d+)").unwrap());
+/// `(built: ...)` date from `php --version`.
+static BUILT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(built:\s*([^)]+)\)").unwrap());
+/// Canonical Homebrew PHP installations, including revisions such as `8.5.12_1`.
+static HOMEBREW_PHP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"^(?:/opt/homebrew|/usr/local|/home/linuxbrew/\.linuxbrew)/Cellar/php(?:@(\d+\.\d+))?/((\d+\.\d+)\.\d+)(?:_\d+)?/bin/php$",
+    )
+    .unwrap()
+});
+/// Exact versioned binary names, used only in standard system bin directories.
+static PHP_BINARY_NAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^php[@-]?(\d+\.\d+)$").unwrap());
 
 // ── Data types ───────────────────────────────────────────────────────────────
 
@@ -33,19 +56,52 @@ pub fn detect_php_versions() -> Vec<PhpVersion> {
 
     candidates.extend(scan_path_binaries());
 
+    detect_candidates(candidates, get_active_php_canon())
+}
+
+fn detect_candidates(candidates: Vec<PathBuf>, active_canon: Option<PathBuf>) -> Vec<PhpVersion> {
     let mut versions_map: HashMap<String, PhpVersion> = HashMap::new();
+    let mut seen_binaries = HashSet::new();
     for binary in candidates {
-        if !binary.exists() && !binary.is_symlink() {
+        // Different opt, Cellar, and PATH entries can resolve to the same binary.
+        // Deduplicate before both path inference and fallback execution, including
+        // failed probes. A dangling symlink cannot identify an installed version.
+        let Ok(canon) = std::fs::canonicalize(&binary) else {
+            continue;
+        };
+        if !binary.is_file() || !seen_binaries.insert(canon.clone()) {
             continue;
         }
+
+        // Fast path: derive the version from the resolved path without executing
+        // php. Skips duplicate opt/Cellar/PATH entries for an already-seen version.
+        if let Some(hint) = version_from_path(&canon) {
+            if versions_map.contains_key(&hint.version) {
+                continue;
+            }
+            let full_version = hint
+                .full_version
+                .map(|full| format!("PHP {}", full))
+                .unwrap_or_else(|| format!("PHP {}", hint.version));
+            versions_map.insert(
+                hint.version.clone(),
+                PhpVersion {
+                    version: hint.version,
+                    full_version,
+                    binary_path: binary,
+                    active: false,
+                },
+            );
+            continue;
+        }
+
+        // Fallback: path carries no version (custom build) — execute php once.
         if let Some(version) = probe_php_binary(&binary) {
             versions_map
                 .entry(version.version.clone())
                 .or_insert(version);
         }
     }
-
-    let active_canon = get_active_php_canon();
 
     let mut versions: Vec<PhpVersion> = versions_map.into_values().collect();
 
@@ -185,15 +241,13 @@ fn scan_path_binaries() -> Vec<PathBuf> {
 }
 
 fn probe_php_binary(binary: &Path) -> Option<PhpVersion> {
-    let version_re = Regex::new(r"PHP (\d+\.\d+)\.(\d+)").ok()?;
-
     let output = Command::new(binary).arg("--version").output().ok()?;
     if !output.status.success() && output.stdout.is_empty() {
         return None;
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let cap = version_re.captures(&stdout)?;
+    let cap = PHP_VERSION_FULL_RE.captures(&stdout)?;
 
     let major_minor = cap.get(1)?.as_str().to_string();
     let patch = cap.get(2)?.as_str();
@@ -268,8 +322,7 @@ pub fn normalize_version_str(s: &str) -> String {
         .trim_start_matches("php@")
         .trim_start_matches("php")
         .trim_start_matches("PHP");
-    let re = Regex::new(r"(\d+\.\d+)").unwrap();
-    if let Some(cap) = re.captures(s) {
+    if let Some(cap) = VERSION_RE.captures(s) {
         return cap.get(1).unwrap().as_str().to_string();
     }
     s.to_string()
@@ -278,8 +331,8 @@ pub fn normalize_version_str(s: &str) -> String {
 pub fn get_build_date(binary: &Path) -> Option<String> {
     let output = Command::new(binary).arg("--version").output().ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let re = Regex::new(r"\(built:\s*([^)]+)\)").ok()?;
-    re.captures(&stdout)
+    BUILT_RE
+        .captures(&stdout)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().trim().to_string())
 }
@@ -296,14 +349,214 @@ pub fn get_loaded_modules(binary: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Quickly returns the active PHP major.minor version and its binary path
-/// by running `php --version` on the `php` found in PATH.
-/// Much cheaper than `detect_php_versions()` — only one subprocess.
+/// Returns the active PHP major.minor version and its binary path.
+/// The fast path derives the version from the resolved `php` symlink/path with no
+/// subprocess; only an unrecognizable (custom) path falls back to executing php.
 pub fn get_active_php_quick() -> Option<(String, PathBuf)> {
     let php_path = which::which("php").ok()?;
+    active_php_from_path(php_path)
+}
+
+fn active_php_from_path(php_path: PathBuf) -> Option<(String, PathBuf)> {
+    // Fast path: derive the version from the resolved symlink/path — no subprocess.
+    let canon = std::fs::canonicalize(&php_path).ok()?;
+    if let Some(hint) = version_from_path(&canon) {
+        return Some((hint.version, php_path));
+    }
+
+    // Fallback: custom build whose path carries no version — execute php.
     let output = Command::new(&php_path).arg("--version").output().ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let re = Regex::new(r"PHP (\d+\.\d+)").ok()?;
-    let version = re.captures(&stdout)?.get(1)?.as_str().to_string();
+    let version = PHP_VERSION_RE
+        .captures(&stdout)?
+        .get(1)?
+        .as_str()
+        .to_string();
     Some((version, php_path))
+}
+
+struct PathVersion {
+    version: String,
+    full_version: Option<String>,
+}
+
+/// Infer versions only from recognized package-manager layouts. Arbitrary
+/// directory names and custom executables must be verified by running PHP.
+fn version_from_path(path: &Path) -> Option<PathVersion> {
+    if let Some(cap) = HOMEBREW_PHP_RE.captures(path.to_str()?) {
+        let version = cap.get(3)?.as_str();
+        if cap
+            .get(1)
+            .is_some_and(|formula| formula.as_str() != version)
+        {
+            return None;
+        }
+        return Some(PathVersion {
+            version: version.to_string(),
+            full_version: Some(cap.get(2)?.as_str().to_string()),
+        });
+    }
+
+    let parent = path.parent()?;
+    if !["/usr/bin", "/usr/local/bin", "/bin"]
+        .iter()
+        .any(|directory| parent == Path::new(directory))
+    {
+        return None;
+    }
+    let cap = PHP_BINARY_NAME_RE.captures(path.file_name()?.to_str()?)?;
+    Some(PathVersion {
+        version: cap.get(1)?.as_str().to_string(),
+        full_version: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_homebrew_versions_and_revision_suffixes() {
+        for path in [
+            "/opt/homebrew/Cellar/php/8.3.11/bin/php",
+            "/opt/homebrew/Cellar/php/8.3.11_1/bin/php",
+            "/usr/local/Cellar/php@8.3/8.3.11_12/bin/php",
+            "/home/linuxbrew/.linuxbrew/Cellar/php/8.3.11_1/bin/php",
+        ] {
+            let hint = version_from_path(Path::new(path)).unwrap();
+            assert_eq!(hint.version, "8.3", "{path}");
+            assert_eq!(hint.full_version.as_deref(), Some("8.3.11"), "{path}");
+        }
+    }
+
+    #[test]
+    fn recognizes_exact_system_binary_names() {
+        for path in ["/usr/bin/php8.3", "/usr/local/bin/php-8.3", "/bin/php@8.3"] {
+            let hint = version_from_path(Path::new(path)).unwrap();
+            assert_eq!(hint.version, "8.3");
+            assert!(hint.full_version.is_none());
+        }
+    }
+
+    #[test]
+    fn rejects_custom_paths_and_ambiguous_installation_layouts() {
+        for path in [
+            "/custom/8.1/bin/php",
+            "/custom/php8.1/bin/php",
+            "/custom/bin/php8.3",
+            "/custom/Cellar/php/8.3.11/bin/php",
+            "/usr/bin/php8.3-custom",
+            "/usr/bin/php8.3.11",
+            "/opt/homebrew/Cellar/php@8.1/8.3.11/bin/php",
+            "/opt/homebrew/Cellar/php/8.3.11_bad/bin/php",
+            "/opt/homebrew/Cellar/php/8.3.11/bin/php-cgi",
+        ] {
+            assert!(version_from_path(Path::new(path)).is_none(), "{path}");
+        }
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct Fixture(PathBuf);
+
+        impl Fixture {
+            fn new() -> Self {
+                static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+                let unique = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let path = std::env::temp_dir().join(format!(
+                    "pvm-detector-{}-{unique}-{}",
+                    std::process::id(),
+                    SEQUENCE.fetch_add(1, Ordering::Relaxed)
+                ));
+                std::fs::create_dir(&path).unwrap();
+                Self(path)
+            }
+
+            fn binary(&self, relative: &str, success: bool) -> PathBuf {
+                let binary = self.0.join(relative);
+                std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+                let output = if success {
+                    "printf 'PHP 8.3.11\\n'\n"
+                } else {
+                    "exit 1\n"
+                };
+                std::fs::write(
+                    &binary,
+                    format!("#!/bin/sh\nprintf 'probe\\n' >> \"$0.calls\"\n{output}"),
+                )
+                .unwrap();
+                std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+                binary
+            }
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[test]
+        fn probes_custom_binary_instead_of_trusting_parent_version() {
+            let fixture = Fixture::new();
+            let binary = fixture.binary("custom/8.1/bin/php", true);
+            let (version, path) = active_php_from_path(binary.clone()).unwrap();
+            assert_eq!(version, "8.3");
+            assert_eq!(path, binary);
+        }
+
+        #[test]
+        fn does_not_infer_version_of_broken_custom_executable() {
+            let fixture = Fixture::new();
+            let binary = fixture.binary("custom/php8.3", false);
+            assert!(active_php_from_path(binary).is_none());
+        }
+
+        #[test]
+        fn probes_each_canonical_binary_once_and_preserves_active_path() {
+            let fixture = Fixture::new();
+            let binary = fixture.binary("custom/8.1/bin/php", true);
+            let alias = fixture.0.join("php-alias");
+            symlink(&binary, &alias).unwrap();
+            let versions = detect_candidates(
+                vec![binary.clone(), alias, binary.clone()],
+                Some(std::fs::canonicalize(&binary).unwrap()),
+            );
+            assert_eq!(versions.len(), 1);
+            assert_eq!(versions[0].version, "8.3");
+            assert_eq!(versions[0].full_version, "PHP 8.3.11");
+            assert_eq!(versions[0].binary_path, binary);
+            assert!(versions[0].active);
+            let calls = std::fs::read_to_string(binary.with_file_name("php.calls")).unwrap();
+            assert_eq!(calls.lines().count(), 1);
+        }
+
+        #[test]
+        fn does_not_retry_a_failed_probe_through_duplicate_paths() {
+            let fixture = Fixture::new();
+            let binary = fixture.binary("custom/php", false);
+            let alias = fixture.0.join("php-alias");
+            symlink(&binary, &alias).unwrap();
+            let versions = detect_candidates(vec![binary.clone(), alias], None);
+            assert!(versions.is_empty());
+            let calls = std::fs::read_to_string(binary.with_file_name("php.calls")).unwrap();
+            assert_eq!(calls.lines().count(), 1);
+        }
+
+        #[test]
+        fn excludes_dangling_symlinks() {
+            let fixture = Fixture::new();
+            let alias = fixture.0.join("php8.3");
+            symlink(fixture.0.join("missing"), &alias).unwrap();
+            assert!(detect_candidates(vec![alias.clone()], None).is_empty());
+            assert!(active_php_from_path(alias).is_none());
+        }
+    }
 }

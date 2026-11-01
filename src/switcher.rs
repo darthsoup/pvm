@@ -24,8 +24,8 @@ pub fn switch_version(version_str: &str, opts: &SwitchOptions) -> Result<()> {
     let resolved = resolve_version_or_alias(version_str, &aliases);
     let normalized = normalize_version_str(&resolved);
 
-    // Fast path: one subprocess instead of N*2. If the active PHP is already
-    // the requested version we can return immediately without full detection.
+    // Recognized package-manager paths need no PHP subprocess. Custom binaries
+    // are probed once; an already-active version avoids full discovery entirely.
     if let Some((current_ver, current_path)) = detect_php_versions_quick()
         && current_ver == normalized
     {
@@ -98,15 +98,19 @@ fn do_switch(
     _opts: &SwitchOptions,
 ) -> Result<()> {
     if which::which("brew").is_ok() {
-        for v in all_versions {
-            if v.version != target.version {
-                let _ = Command::new("brew")
-                    .args(["unlink", &format!("php@{}", v.version)])
-                    .output();
-            }
+        // Unlink only the currently-active formula instead of every installed one
+        // (each `brew` call spawns Ruby and is slow). The `brew link --overwrite`
+        // below replaces any remaining conflicting symlinks anyway.
+        if let Some(active) = all_versions
+            .iter()
+            .find(|v| v.active && v.version != target.version)
+        {
+            let _ = Command::new("brew")
+                .args(["unlink", &format!("php@{}", active.version)])
+                .output();
+            // The active php may be the unversioned formula — unlink it too.
+            let _ = Command::new("brew").args(["unlink", "php"]).output();
         }
-        // Also unlink the unversioned formula in case it's the active link
-        let _ = Command::new("brew").args(["unlink", "php"]).output();
 
         let formula = format!("php@{}", target.version);
         let status = Command::new("brew")

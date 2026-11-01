@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from benchmarks import benchmark_discovery
 from benchmarks.comparison import compare_results
+from benchmarks.commands import benchmark_command_pair
 
 
 def result():
@@ -84,6 +85,16 @@ class BaselineComparisonTests(unittest.TestCase):
 
 
 class DiscoverySafetyTests(unittest.TestCase):
+    def test_paired_benchmark_rejects_switching_commands(self):
+        with self.assertRaisesRegex(ValueError, "only supports"):
+            benchmark_command_pair("before", "after", "auto")
+
+    def test_paired_list_does_not_create_state_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("benchmarks.commands.Path.home", return_value=Path(directory)):
+                with self.assertRaisesRegex(ValueError, "could create"):
+                    benchmark_command_pair("before", "after", "list")
+
     def test_absent_state_directory_skips_list(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch("benchmarks.commands.Path.home", return_value=Path(directory)):

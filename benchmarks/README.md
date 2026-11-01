@@ -54,3 +54,18 @@ batch is discarded. The p95 describes batch averages, not individual transitions
 Hooks use temporary fixtures and an external logging stub; they never perform real
 PHP switches or service restarts. `--auto-delay-ms` models backend delay explicitly.
 See [the investigation](../docs/performance.md) for measured production bottlenecks.
+
+## Compare two builds directly
+
+Build and save both executables with the same dependencies and toolchain, then run:
+
+```sh
+python3 benchmarks/compare_binaries.py --before /tmp/pvm-before --after ./target/release/pvm --json /tmp/pvm-paired.json
+```
+
+This measures `--help`, `current`, and `list` with alternating before/after execution
+order and nine measured pairs after warmup. `benchmark_command_pair()` in
+`benchmarks.commands` provides the same measurement as a Python function.
+It permits only those read-only commands and skips `list` in the CLI when `~/.pvm`
+does not exist. See [the patch assessment](../docs/performance-review.md) for the
+detector/switcher comparison and its correctness limitations.

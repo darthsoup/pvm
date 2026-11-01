@@ -9,7 +9,8 @@
 - `src/detector.rs` and `src/switcher.rs`: PHP discovery and platform-specific switching.
 - `src/pvmrc.rs`, `src/aliases.rs`, and `src/utils.rs`: project version files, aliases, configuration, and shared helpers.
 - `src/webserver.rs`: Apache/Nginx detection, configuration, and restarts.
-- `.github/workflows/`: CI and tagged release builds. Cargo output lives in ignored `target/`; there are currently no dedicated test or asset directories.
+- `benchmarks/`: Python performance functions and comparison tests; run `just bench` or `just bench-test`.
+- `.github/workflows/`: CI and tagged release builds. Cargo output lives in ignored `target/`.
 
 ## Build, Test, and Development Commands
 
@@ -33,7 +34,7 @@ Use four-space indentation, `snake_case` for functions/modules, and `PascalCase`
 
 ## Testing Guidelines
 
-Use Rust's built-in test framework: module-local `#[cfg(test)]` blocks and descriptive `#[test]` function names such as `normalizes_patch_version`. Filter with `cargo test normalizes_patch_version --all-features`. No tests or coverage threshold currently exist, so a passing test command alone does not verify behavior. For behavioral changes, cover relevant parsing and resolution cases and document manual platform/shell checks.
+Use Rust's built-in test framework: module-local `#[cfg(test)]` blocks and descriptive `#[test]` function names. Detector tests cover path inference and isolated subprocess probes. Filter with `cargo test detector --all-features`. No coverage threshold is enforced. For behavioral changes, cover relevant parsing and resolution cases and document manual platform/shell checks. Run Python benchmark checks with `just bench-test`.
 
 ## Commit & Pull Request Guidelines
 
