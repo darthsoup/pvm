@@ -228,6 +228,36 @@ fn json_records_short_output_color_and_verbose_streams() {
         .clone();
     let doc: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(doc["data"]["version"]["ini_path"], "/fake/php.ini");
+    let colored = f
+        .cmd()
+        .args(["list", "--color", "always"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(colored.windows(5).any(|bytes| bytes == b"\x1b[32m"));
+    assert!(colored.windows(5).any(|bytes| bytes == b"\x1b[36m"));
+    let plain = f
+        .cmd()
+        .args(["list", "--color", "never"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(plain.starts_with(b"VERSION\tSTATUS\tALIASES\tPATH\n"));
+    assert!(!plain.contains(&27));
+    let data = f
+        .cmd()
+        .args(["list", "--json", "--color", "always"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(!data.contains(&27));
+    serde_json::from_slice::<Value>(&data).unwrap();
 }
 #[cfg(unix)]
 #[test]

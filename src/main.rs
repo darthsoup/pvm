@@ -106,7 +106,11 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Alias { name, version }) => cmd_alias(name.as_deref(), version.as_deref())?,
         Some(Commands::Unalias { name }) => {
             aliases::remove_alias(&name)?;
-            eprintln!("Removed alias '{name}'");
+            eprintln!(
+                "{} Removed alias '{}'",
+                output::style("✓", "32", true),
+                output::style(&name, "36", true)
+            );
         }
         Some(Commands::Pin { version, force }) => cmd_pin(version.as_deref(), force)?,
         Some(Commands::Auto {
@@ -156,7 +160,7 @@ fn cmd_list(json_output: bool) -> Result<()> {
     if json_output {
         output::json("list", json!({"versions": versions}), None)?;
     } else {
-        output::list(&versions);
+        output::list(&versions, &aliases);
     }
     Ok(())
 }
@@ -186,7 +190,7 @@ fn cmd_current(json_output: bool, short: bool) -> Result<()> {
         println!(
             "PHP {} ({})",
             output::style(&current.version, "1;32", false),
-            current.binary_path.display()
+            output::style(&current.binary_path.display().to_string(), "2", false)
         );
     }
     Ok(())
@@ -263,19 +267,38 @@ fn render_switch(
         eprintln!(
             "{} PHP {} ({}){}",
             if result.changed {
-                "Now using"
+                format!("{} Now using", output::style("✓", "32", true))
             } else {
-                "Already using"
+                "Already using".to_owned()
             },
-            result.version,
-            result.binary_path.display(),
-            source
+            output::style(&result.version, "1;32", true),
+            output::style(&result.binary_path.display().to_string(), "2", true),
+            output::style(&source, "2", true)
         );
         if result.apache != "skipped" {
-            eprintln!("Apache configuration: {}", result.apache);
+            eprintln!(
+                "Apache configuration: {}",
+                output::style(
+                    &result.apache,
+                    if result.apache == "failed" { "31" } else { "2" },
+                    true
+                )
+            );
         }
         for outcome in &result.restarts {
-            eprintln!("{}: {}", outcome.server.name(), outcome.status);
+            eprintln!(
+                "{}: {}",
+                outcome.server.name(),
+                output::style(
+                    &outcome.status,
+                    match outcome.status.as_str() {
+                        "restarted" => "32",
+                        "failed" => "31",
+                        _ => "2",
+                    },
+                    true
+                )
+            );
             if let Some(notice) = &outcome.notice {
                 eprintln!("  {notice}");
             }
@@ -293,7 +316,12 @@ fn render_switch(
 fn cmd_alias(name: Option<&str>, value: Option<&str>) -> Result<()> {
     if let (Some(name), Some(value)) = (name, value) {
         aliases::set_alias(name, value)?;
-        eprintln!("Alias {name} → {value}");
+        eprintln!(
+            "{} Alias {} → {}",
+            output::style("✓", "32", true),
+            output::style(name, "1;36", true),
+            output::style(value, "1", true)
+        );
         return Ok(());
     }
     let aliases = aliases::load_aliases()?;
@@ -301,7 +329,11 @@ fn cmd_alias(name: Option<&str>, value: Option<&str>) -> Result<()> {
         let value = aliases
             .get(name)
             .with_context(|| format!("Alias '{name}' not found"))?;
-        println!("{name} → {value}");
+        println!(
+            "{} → {}",
+            output::style(name, "1;36", false),
+            output::style(value, "1", false)
+        );
     } else {
         let mut values: Vec<_> = aliases.iter().collect();
         values.sort_by_key(|(name, _)| *name);
@@ -309,7 +341,11 @@ fn cmd_alias(name: Option<&str>, value: Option<&str>) -> Result<()> {
             println!("No aliases defined. Use pvm alias default 8.3");
         }
         for (name, value) in values {
-            println!("{name} → {value}");
+            println!(
+                "{} → {}",
+                output::style(name, "1;36", false),
+                output::style(value, "1", false)
+            );
         }
     }
     Ok(())
@@ -323,9 +359,11 @@ fn cmd_pin(version: Option<&str>, force: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("Cannot determine current directory")?;
     let changed = pvmrc::write_pvmrc(&cwd, &pin, force)?;
     eprintln!(
-        "{} PHP {pin} in {}",
+        "{} {} PHP {} in {}",
+        output::style("✓", "32", true),
         if changed { "Pinned" } else { "Already pinned" },
-        cwd.join(".pvmrc").display()
+        output::style(&pin, "1", true),
+        output::style(&cwd.join(".pvmrc").display().to_string(), "2", true)
     );
     Ok(())
 }
@@ -381,22 +419,56 @@ fn cmd_info(version: &str, json_output: bool) -> Result<()> {
         object.insert("modules".into(), json!(modules));
         output::json("info", json!({"version": info}), None)?;
     } else {
-        println!("{}", version.full_version);
-        println!("Binary:     {}", version.binary_path.display());
-        println!(
-            "Status:     {}",
-            if version.active { "active" } else { "inactive" }
-        );
-        println!("Aliases:    {}", record.aliases.join(", "));
-        println!("php.ini:    {}", ini_path.as_deref().unwrap_or("unknown"));
-        println!("Scan dir:   {}", scan_dir.as_deref().unwrap_or("unknown"));
-        println!("Build date: {}", build_date.as_deref().unwrap_or("unknown"));
-        println!(
-            "Modules:    {}",
-            modules
-                .map(|m| m.join(", "))
-                .unwrap_or_else(|| "unknown".into())
-        );
+        println!("{}", output::style(&version.full_version, "1", false));
+        output::rule();
+        for (label, value, color) in [
+            ("Binary:", version.binary_path.display().to_string(), "2"),
+            (
+                "Status:",
+                if version.active {
+                    "active ✓"
+                } else {
+                    "inactive"
+                }
+                .to_owned(),
+                if version.active { "32" } else { "2" },
+            ),
+            ("Aliases:", record.aliases.join(", "), "36"),
+            (
+                "php.ini:",
+                ini_path.unwrap_or_else(|| "unknown".into()),
+                "2",
+            ),
+            (
+                "Scan dir:",
+                scan_dir.unwrap_or_else(|| "unknown".into()),
+                "2",
+            ),
+            (
+                "Build date:",
+                build_date.unwrap_or_else(|| "unknown".into()),
+                "0",
+            ),
+        ] {
+            println!(
+                "  {} {}",
+                output::style(&format!("{label:12}"), "2", false),
+                output::style(&value, color, false)
+            );
+        }
+        output::rule();
+        if let Some(modules) = modules {
+            println!(
+                "{}",
+                output::style(&format!("Loaded modules ({}):", modules.len()), "1", false)
+            );
+            println!("  {}", output::style(&modules.join(", "), "2", false));
+        } else {
+            println!(
+                "{}",
+                output::style("Could not retrieve loaded modules.", "2", false)
+            );
+        }
     }
     Ok(())
 }

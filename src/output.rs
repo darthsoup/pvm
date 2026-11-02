@@ -41,6 +41,9 @@ pub fn style(text: &str, code: &str, stderr: bool) -> String {
     if enabled {
         match code {
             "1" => text.bold().to_string(),
+            "2" => text.dimmed().to_string(),
+            "36" => text.cyan().to_string(),
+            "1;36" => text.cyan().bold().to_string(),
             "1;31" => text.red().bold().to_string(),
             "1;32" => text.green().bold().to_string(),
             "31" => text.red().to_string(),
@@ -93,9 +96,18 @@ impl VersionRecord {
         }
     }
 }
-pub fn list(versions: &[VersionRecord]) {
+pub fn rule() {
+    let width = dialoguer::console::Term::stdout().size().1;
+    println!(
+        "{}",
+        style(&"─".repeat(usize::from(width.clamp(1, 58))), "2", false)
+    );
+}
+
+pub fn list(versions: &[VersionRecord], aliases: &crate::aliases::Aliases) {
     if versions.is_empty() {
-        println!("No PHP versions found. Install PHP using Homebrew or your package manager.");
+        println!("{}", style("No PHP versions found.", "33", false));
+        println!("Install PHP using Homebrew or your package manager.");
         return;
     }
     if !std::io::stdout().is_terminal() {
@@ -103,42 +115,63 @@ pub fn list(versions: &[VersionRecord]) {
         for v in versions {
             println!(
                 "{}\t{}\t{}\t{}",
-                v.version,
-                if v.active { "active" } else { "inactive" },
-                v.aliases.join(","),
-                v.path
+                style(&v.version, "1", false),
+                style(
+                    if v.active { "active" } else { "inactive" },
+                    if v.active { "32" } else { "2" },
+                    false
+                ),
+                style(&v.aliases.join(","), "36", false),
+                style(&v.path, "2", false),
             );
         }
         return;
     }
-    let width = dialoguer::console::Term::stdout().size().1;
-    if width < 80 {
-        for v in versions {
+    let narrow = dialoguer::console::Term::stdout().size().1 < 80;
+    println!(
+        "{}",
+        style(
+            &format!("PHP Versions Installed ({})", versions.len()),
+            "1",
+            false
+        )
+    );
+    rule();
+    for v in versions {
+        let bullet = style(
+            if v.active { "●" } else { "○" },
+            if v.active { "1;32" } else { "2" },
+            false,
+        );
+        let active = if v.active {
+            format!(" {}", style("[active]", "32", false))
+        } else {
+            String::new()
+        };
+        let tags = v
+            .aliases
+            .iter()
+            .map(|alias| format!(" {}", style(&format!("[{alias}]"), "2", false)))
+            .collect::<String>();
+        if narrow {
+            println!("{bullet} {}{active}{tags}", style(&v.version, "1", false));
+            println!("  {}", style(&v.path, "2", false));
+        } else {
             println!(
-                "{}  {}",
+                "{bullet} {}  {}{active}{tags}",
                 style(&v.version, "1", false),
-                if v.active { "active" } else { "inactive" }
+                style(&v.path, "2", false)
             );
-            println!("  {}", v.path);
-            if !v.aliases.is_empty() {
-                println!("  Aliases: {}", v.aliases.join(", "));
-            }
         }
-    } else {
-        use comfy_table::{ContentArrangement, Table};
-        let mut table = Table::new();
-        table
-            .set_header(["VERSION", "STATUS", "ALIASES", "PATH"])
-            .set_content_arrangement(ContentArrangement::Dynamic)
-            .set_width(width);
-        for v in versions {
-            table.add_row([
-                v.version.clone(),
-                if v.active { "active" } else { "inactive" }.into(),
-                v.aliases.join(", "),
-                v.path.to_string(),
-            ]);
-        }
-        println!("{table}");
+    }
+    rule();
+    if !aliases.is_empty() {
+        let mut aliases: Vec<_> = aliases.iter().collect();
+        aliases.sort_by_key(|(name, _)| *name);
+        let aliases = aliases
+            .iter()
+            .map(|(name, version)| format!("{} → {version}", style(name, "36", false)))
+            .collect::<Vec<_>>();
+        println!("Aliases: {}", aliases.join(" | "));
     }
 }
