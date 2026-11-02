@@ -69,3 +69,14 @@ order and nine measured pairs after warmup. `benchmark_command_pair()` in
 It permits only those read-only commands and skips `list` in the CLI when `~/.pvm`
 does not exist. See [the patch assessment](../docs/performance-review.md) for the
 detector/switcher comparison and its correctness limitations.
+
+### CLI upgrade hook fixtures
+
+Hook benchmarks now use a temporary HOME containing a shared hook-state token.
+The logging stub emits the private `auto --hook` success record when requested;
+it remains compatible with the previous generated hooks for before/after runs.
+The cached scenario alternates between subdirectories sharing the same version
+file. Separate project files deliberately invalidate the source-path cache even
+when they request the same release line. JSON records include
+`hook_fixture_version: 2`; regenerate older baselines with this runner before
+comparing. Regression thresholds remain 20% with a 0.1 ms absolute noise floor.

@@ -4,7 +4,7 @@ import math
 
 
 CONFIG_FIELDS = (
-    "schema_version", "platform", "iterations", "samples", "depth", "auto_delay_ms",
+    "schema_version", "hook_fixture_version", "platform", "iterations", "samples", "depth", "auto_delay_ms",
     "include_discovery", "discovery_iterations",
 )
 

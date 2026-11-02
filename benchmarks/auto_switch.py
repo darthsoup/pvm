@@ -41,6 +41,7 @@ def benchmark(args):
         raise ValueError("binary not found: {}; run cargo build --release".format(binary))
     result = {
         "schema_version": 1,
+        "hook_fixture_version": 2,
         "binary": str(binary),
         "platform": platform.platform(),
         "iterations": args.iterations,

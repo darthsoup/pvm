@@ -3,6 +3,14 @@
 Investigated on macOS on 2026-11-02. Measurements describe this machine and the
 current working tree; they are not performance targets for other machines.
 
+This is the historical investigation before the detector refinements. The
+[applied follow-up](performance-review.md#applied-follow-up) records the fixes,
+regression tests, and updated measurements.
+
+The later [matched-build patch assessment](performance-review.md) measures the
+original and modified detector/switcher implementations directly and documents
+their benefits and correctness limitations.
+
 ## Where the time goes
 
 The generated hook walks upward to find a version file, compares its contents

@@ -11,8 +11,6 @@ static PHP_VERSION_FULL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"PHP (\d+\.\d+)\.(\d+)").unwrap());
 /// `PHP 8.3` → captures "8.3".
 static PHP_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"PHP (\d+\.\d+)").unwrap());
-/// Any `8.3`-style major.minor.
-static VERSION_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+\.\d+)").unwrap());
 /// `(built: ...)` date from `php --version`.
 static BUILT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(built:\s*([^)]+)\)").unwrap());
 /// Canonical Homebrew PHP installations, including revisions such as `8.5.12_1`.
@@ -56,6 +54,10 @@ pub fn detect_php_versions() -> Vec<PhpVersion> {
 
     candidates.extend(scan_path_binaries());
 
+    crate::output::verbose(&format!(
+        "Discovery: {} package-manager/PATH candidates",
+        candidates.len()
+    ));
     detect_candidates(candidates, get_active_php_canon())
 }
 
@@ -75,8 +77,9 @@ fn detect_candidates(candidates: Vec<PathBuf>, active_canon: Option<PathBuf>) ->
 
         // Fast path: derive the version from the resolved path without executing
         // php. Skips duplicate opt/Cellar/PATH entries for an already-seen version.
+        crate::output::verbose(&format!("Discovery source: {}", binary.display()));
         if let Some(hint) = version_from_path(&canon) {
-            if versions_map.contains_key(&hint.version) {
+            if versions_map.contains_key(&hint.version) && active_canon.as_ref() != Some(&canon) {
                 continue;
             }
             let full_version = hint
@@ -97,9 +100,13 @@ fn detect_candidates(candidates: Vec<PathBuf>, active_canon: Option<PathBuf>) ->
 
         // Fallback: path carries no version (custom build) — execute php once.
         if let Some(version) = probe_php_binary(&binary) {
-            versions_map
-                .entry(version.version.clone())
-                .or_insert(version);
+            if active_canon.as_ref() == Some(&canon) {
+                versions_map.insert(version.version.clone(), version);
+            } else {
+                versions_map
+                    .entry(version.version.clone())
+                    .or_insert(version);
+            }
         }
     }
 
@@ -240,9 +247,9 @@ fn scan_path_binaries() -> Vec<PathBuf> {
     paths
 }
 
-fn probe_php_binary(binary: &Path) -> Option<PhpVersion> {
+pub fn probe_php_binary(binary: &Path) -> Option<PhpVersion> {
     let output = Command::new(binary).arg("--version").output().ok()?;
-    if !output.status.success() && output.stdout.is_empty() {
+    if !output.status.success() {
         return None;
     }
 
@@ -267,6 +274,9 @@ pub fn probe_ini(binary: &Path) -> (Option<String>, Option<String>) {
         Err(_) => return (None, None),
     };
 
+    if !output.status.success() {
+        return (None, None);
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut ini_path = None;
     let mut scan_dir = None;
@@ -307,29 +317,15 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
     a_canon == b_canon
 }
 
-pub fn get_active_version(versions: &[PhpVersion]) -> Option<&PhpVersion> {
-    versions.iter().find(|v| v.active)
-}
-
 pub fn find_version<'a>(versions: &'a [PhpVersion], target: &str) -> Option<&'a PhpVersion> {
-    let normalized = normalize_version_str(target);
-    versions.iter().find(|v| v.version == normalized)
-}
-
-// Accepts: "8.3", "8.3.4", "php8.3", "PHP8.3", "php@8.3"
-pub fn normalize_version_str(s: &str) -> String {
-    let s = s
-        .trim_start_matches("php@")
-        .trim_start_matches("php")
-        .trim_start_matches("PHP");
-    if let Some(cap) = VERSION_RE.captures(s) {
-        return cap.get(1).unwrap().as_str().to_string();
-    }
-    s.to_string()
+    versions.iter().find(|v| v.version == target)
 }
 
 pub fn get_build_date(binary: &Path) -> Option<String> {
     let output = Command::new(binary).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     BUILT_RE
         .captures(&stdout)
@@ -337,16 +333,21 @@ pub fn get_build_date(binary: &Path) -> Option<String> {
         .map(|m| m.as_str().trim().to_string())
 }
 
-pub fn get_loaded_modules(binary: &Path) -> Vec<String> {
+pub fn get_loaded_modules(binary: &Path) -> Option<Vec<String>> {
     let output = match Command::new(binary).arg("-m").output() {
         Ok(o) => o,
-        Err(_) => return Vec::new(),
+        Err(_) => return None,
     };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('['))
-        .map(|l| l.trim().to_string())
-        .collect()
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('['))
+            .map(|l| l.trim().to_string())
+            .collect(),
+    )
 }
 
 /// Returns the active PHP major.minor version and its binary path.
@@ -366,6 +367,9 @@ fn active_php_from_path(php_path: PathBuf) -> Option<(String, PathBuf)> {
 
     // Fallback: custom build whose path carries no version — execute php.
     let output = Command::new(&php_path).arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     let version = PHP_VERSION_RE
         .captures(&stdout)?
@@ -548,6 +552,20 @@ mod tests {
             assert!(versions.is_empty());
             let calls = std::fs::read_to_string(binary.with_file_name("php.calls")).unwrap();
             assert_eq!(calls.lines().count(), 1);
+        }
+
+        #[test]
+        fn prefers_active_binary_when_multiple_installations_share_a_release_line() {
+            let fixture = Fixture::new();
+            let first = fixture.binary("one/php", true);
+            let active = fixture.binary("two/php", true);
+            let versions = detect_candidates(
+                vec![first, active.clone()],
+                Some(std::fs::canonicalize(&active).unwrap()),
+            );
+            assert_eq!(versions.len(), 1);
+            assert_eq!(versions[0].binary_path, active);
+            assert!(versions[0].active);
         }
 
         #[test]

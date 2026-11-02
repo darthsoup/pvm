@@ -1,821 +1,470 @@
 mod aliases;
 mod cli;
 mod detector;
+mod doctor;
+mod hooks;
+mod output;
+mod prompts;
 mod pvmrc;
+mod state;
 mod switcher;
 mod utils;
+mod version;
 mod webserver;
 
-use anyhow::{Context, Result};
-use clap::Parser;
-use colored::Colorize;
-
-use cli::{Cli, Commands, ShellChoice};
+use anyhow::{Context, Result, bail};
+use clap::{CommandFactory, FromArgMatches};
+use cli::{Cli, Commands, ConfigCommand, RestartArgs, ShellChoice};
+use prompts::{Prompts, TerminalPrompts};
+use serde_json::json;
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("{} {}", "error:".red().bold(), e);
-        for cause in e.chain().skip(1) {
-            eprintln!("  {} {}", "caused by:".dimmed(), cause);
+    let cli = parse_cli();
+    let json_command = cli.json_command();
+    output::configure(cli.verbose, cli.color);
+    if let Err(error) = dispatch(cli).map(|code| {
+        let code = if prompts::interrupted() { 130 } else { code };
+        if code != 0 {
+            std::process::exit(code);
         }
-        std::process::exit(1);
+    }) {
+        if let Some(command) = json_command {
+            if let Err(render) = output::json(command, serde_json::Value::Null, Some(&error)) {
+                output::error(&render);
+            }
+        } else {
+            output::error(&error);
+        }
+        std::process::exit(
+            if prompts::interrupted() || error.downcast_ref::<prompts::Interrupted>().is_some() {
+                130
+            } else {
+                1
+            },
+        );
     }
 }
-
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-
-    if cli.list {
-        return cmd_list();
+fn parse_cli() -> Cli {
+    let args: Vec<_> = std::env::args_os().collect();
+    // Inspect only color spellings for Clap's early help/error rendering. The
+    // actual parse remains authoritative, including all forwarded child flags.
+    let mut color = clap::ColorChoice::Auto;
+    let mut values = args.iter().skip(1);
+    while let Some(arg) = values.next() {
+        if arg == "--" {
+            break;
+        }
+        let value = if arg == "--color" {
+            values.next().and_then(|v| v.to_str())
+        } else {
+            arg.to_str().and_then(|v| v.strip_prefix("--color="))
+        };
+        if let Some(value) = value {
+            color = match value {
+                "always" => clap::ColorChoice::Always,
+                "never" => clap::ColorChoice::Never,
+                _ => clap::ColorChoice::Auto,
+            };
+        }
     }
-
+    let matches = Cli::command().color(color).get_matches_from(args);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    if cli.list && cli.command.is_some() {
+        Cli::command()
+            .color(color)
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--list cannot be combined with a subcommand; use pvm list",
+            )
+            .exit();
+    }
+    cli
+}
+fn clap_color(color: cli::ColorChoice) -> clap::ColorChoice {
+    match color {
+        cli::ColorChoice::Auto => clap::ColorChoice::Auto,
+        cli::ColorChoice::Always => clap::ColorChoice::Always,
+        cli::ColorChoice::Never => clap::ColorChoice::Never,
+    }
+}
+fn dispatch(cli: Cli) -> Result<i32> {
+    if cli.list {
+        cmd_list(false)?;
+        return Ok(0);
+    }
     match cli.command {
         None => {
-            use clap::CommandFactory;
-            Cli::command().print_help()?;
+            Cli::command().color(clap_color(cli.color)).print_help()?;
             println!();
-            Ok(())
         }
-        Some(Commands::List) => cmd_list(),
-        Some(Commands::Current) => cmd_current(),
-        Some(Commands::Which { version }) => cmd_which(version.as_deref()),
-        Some(Commands::Use {
-            version,
-            no_restart,
-            skip,
-        }) => cmd_use(version.as_deref(), no_restart, &skip),
-        Some(Commands::Alias { name, version }) => cmd_alias(name.as_deref(), version.as_deref()),
-        Some(Commands::Unalias { name }) => cmd_unalias(&name),
-        Some(Commands::Pin { version }) => cmd_pin(version.as_deref()),
+        Some(Commands::List { json }) => cmd_list(json)?,
+        Some(Commands::Current { json, short }) => cmd_current(json, short)?,
+        Some(Commands::Which { version }) => cmd_which(version.as_deref())?,
+        Some(Commands::Use { version, restart }) => {
+            cmd_use(version.as_deref(), restart, &TerminalPrompts)?
+        }
+        Some(Commands::Alias { name, version }) => cmd_alias(name.as_deref(), version.as_deref())?,
+        Some(Commands::Unalias { name }) => {
+            aliases::remove_alias(&name)?;
+            eprintln!("Removed alias '{name}'");
+        }
+        Some(Commands::Pin { version, force }) => cmd_pin(version.as_deref(), force)?,
         Some(Commands::Auto {
             silent,
             silent_if_unchanged,
-            no_restart,
-            skip,
-        }) => cmd_auto(silent, silent_if_unchanged, no_restart, &skip),
-        Some(Commands::Exec { version, args }) => cmd_exec(&version, &args),
-        Some(Commands::Run {
-            version,
-            script,
-            args,
-        }) => cmd_run(&version, &script, &args),
-        Some(Commands::Info { version }) => cmd_info(&version),
-        Some(Commands::Doctor) => cmd_doctor(),
-        Some(Commands::Restart { server }) => cmd_restart(server.as_deref()),
-        Some(Commands::Init { shell }) => cmd_init(shell),
-        Some(Commands::Completions { shell }) => cmd_completions(shell),
-    }
-}
-
-fn cmd_list() -> Result<()> {
-    let versions = detector::detect_php_versions();
-    let aliases = aliases::load_aliases()?;
-
-    if versions.is_empty() {
-        println!("{}", "No PHP versions found.".yellow());
-        println!("Install PHP via Homebrew (macOS) or your package manager (Linux).");
-        return Ok(());
-    }
-
-    println!(
-        "{}",
-        format!("PHP Versions Installed ({})", versions.len()).bold()
-    );
-    utils::horizontal_rule();
-
-    for v in &versions {
-        let bullet = if v.active {
-            "●".green().bold().to_string()
-        } else {
-            "○".dimmed().to_string()
-        };
-
-        let alias_tags: Vec<String> = aliases
-            .iter()
-            .filter(|(_, ver)| {
-                let resolved = aliases::resolve_version_or_alias(ver, &aliases);
-                detector::normalize_version_str(&resolved) == v.version || ver.as_str() == v.version
-            })
-            .map(|(name, _)| format!("[{}]", name).dimmed().to_string())
-            .collect();
-
-        let active_tag = if v.active {
-            format!(" {}", "[active]".green())
-        } else {
-            String::new()
-        };
-
-        let alias_str = if alias_tags.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", alias_tags.join(" "))
-        };
-
-        println!(
-            "{} {}  {}{}{}",
-            bullet,
-            v.version.bold(),
-            v.binary_path.display().to_string().dimmed(),
-            active_tag,
-            alias_str,
-        );
-    }
-
-    utils::horizontal_rule();
-
-    if !aliases.is_empty() {
-        let alias_display: Vec<String> = {
-            let mut sorted: Vec<_> = aliases.iter().collect();
-            sorted.sort_by_key(|(k, _)| k.as_str());
-            sorted
-                .iter()
-                .map(|(k, v)| format!("{} → {}", k.cyan(), v))
-                .collect()
-        };
-        println!("Aliases: {}", alias_display.join(" | "));
-    }
-
-    Ok(())
-}
-
-fn cmd_current() -> Result<()> {
-    let versions = detector::detect_php_versions();
-
-    if let Some(active) = detector::get_active_version(&versions) {
-        println!(
-            "PHP {} ({})",
-            active.version.green().bold(),
-            active.binary_path.display()
-        );
-    } else if let Ok(php_path) = which::which("php") {
-        println!("{}", php_path.display());
-    } else {
-        println!("{}", "No active PHP version found.".yellow());
-        println!("Make sure PHP is installed and in your PATH.");
-    }
-
-    Ok(())
-}
-
-fn cmd_which(version: Option<&str>) -> Result<()> {
-    match version {
-        None => {
-            let path = which::which("php").map_err(|_| anyhow::anyhow!("php not found in PATH"))?;
-            println!("{}", path.display());
+            restart,
+            hook,
+        }) => cmd_auto(silent, silent_if_unchanged, restart, hook)?,
+        Some(Commands::Exec { version, args }) => switcher::exec_version(&version, &args, false)?,
+        Some(Commands::Run { version, command }) => {
+            switcher::exec_version(&version, &command, true)?
         }
-        Some(v) => {
-            let aliases = aliases::load_aliases()?;
-            let resolved = aliases::resolve_version_or_alias(v, &aliases);
-            let normalized = detector::normalize_version_str(&resolved);
-
-            let versions = detector::detect_php_versions();
-            let target = detector::find_version(&versions, &normalized).ok_or_else(|| {
-                let available: Vec<&str> = versions.iter().map(|v| v.version.as_str()).collect();
-                anyhow::anyhow!(
-                    "PHP {} not found. Available: {}",
-                    normalized,
-                    available.join(", ")
-                )
-            })?;
-
-            println!("{}", target.binary_path.display());
-        }
-    }
-    Ok(())
-}
-
-fn cmd_use(version: Option<&str>, no_restart: bool, skip: &[String]) -> Result<()> {
-    let opts = switcher::SwitchOptions {
-        no_restart,
-        skip: skip.to_vec(),
-        update_apache: true,
-        silent: false,
-        silent_if_unchanged: false,
-    };
-
-    match version {
-        Some(v) => switcher::switch_version(v, &opts),
-        None => {
-            let versions = detector::detect_php_versions();
-            if versions.is_empty() {
-                anyhow::bail!(
-                    "No PHP versions found. Install PHP via Homebrew (macOS) \
-                     or your package manager (Linux)."
-                );
-            }
-
-            println!("{}", "Available PHP versions:".bold());
-            let labels: Vec<String> = versions
-                .iter()
-                .map(|v| {
-                    if v.active {
-                        format!("{} {} [active]", v.version, v.binary_path.display())
-                    } else {
-                        format!("{} {}", v.version, v.binary_path.display())
-                    }
-                })
-                .collect();
-
-            let idx = utils::prompt_pick(&labels, "Enter number or version")
-                .ok_or_else(|| anyhow::anyhow!("No version selected"))?;
-
-            let selected = &versions[idx];
-            switcher::switch_version(&selected.version, &opts)
-        }
-    }
-}
-
-fn cmd_alias(name: Option<&str>, version: Option<&str>) -> Result<()> {
-    match (name, version) {
-        (None, _) => {
-            let aliases = aliases::load_aliases()?;
-            if aliases.is_empty() {
-                println!("{}", "No aliases defined.".dimmed());
-                println!("Use 'pvm alias <name> <version>' to create one.");
-            } else {
-                println!("{}", "Aliases:".bold());
-                let mut sorted: Vec<_> = aliases.iter().collect();
-                sorted.sort_by_key(|(k, _)| k.as_str());
-                for (name, ver) in sorted {
-                    println!("  {} → {}", name.cyan().bold(), ver);
-                }
-            }
-            Ok(())
-        }
-        (Some(n), None) => {
-            let aliases = aliases::load_aliases()?;
-            match aliases.get(n) {
-                Some(v) => println!("{} → {}", n.cyan().bold(), v),
-                None => anyhow::bail!("Alias '{}' not found", n),
-            }
-            Ok(())
-        }
-        (Some(n), Some(v)) => {
-            aliases::set_alias(n, v)?;
-            println!("{} Alias {} → {}", "✓".green(), n.cyan().bold(), v.bold());
-            Ok(())
-        }
-    }
-}
-
-fn cmd_unalias(name: &str) -> Result<()> {
-    aliases::remove_alias(name)?;
-    println!("{} Removed alias '{}'", "✓".green(), name.cyan());
-    Ok(())
-}
-
-fn cmd_pin(version: Option<&str>) -> Result<()> {
-    let pin_version = match version {
-        Some(v) => v.to_string(),
-        None => {
-            let versions = detector::detect_php_versions();
-            let active = detector::get_active_version(&versions).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No active PHP version found. Pass a version explicitly: pvm pin <version>"
-                )
-            })?;
-            active.version.clone()
-        }
-    };
-
-    let cwd = std::env::current_dir().context("Cannot determine current directory")?;
-    pvmrc::write_pvmrc(&cwd, &pin_version)?;
-    println!(
-        "{} Pinned PHP {} in {}/.pvmrc",
-        "✓".green(),
-        pin_version.bold(),
-        cwd.display()
-    );
-    Ok(())
-}
-
-fn cmd_auto(
-    silent: bool,
-    silent_if_unchanged: bool,
-    no_restart: bool,
-    skip: &[String],
-) -> Result<()> {
-    let cwd = std::env::current_dir().context("Cannot determine current directory")?;
-
-    let pvmrc_path = pvmrc::find_pvmrc(&cwd);
-
-    match pvmrc_path {
-        None => {
-            if !silent && !silent_if_unchanged {
-                println!(
-                    "{}",
-                    "No version file (.pvmrc, .php-version, .pvm) found in this directory or any parent.".dimmed()
-                );
-            }
-            Ok(())
-        }
-        Some(path) => {
-            let version_str = pvmrc::read_pvmrc(&path)?;
-            if version_str.is_empty() {
-                if !silent && !silent_if_unchanged {
-                    println!(
-                        "{}",
-                        format!("Empty {} — nothing to do.", path.display()).dimmed()
-                    );
-                }
-                return Ok(());
-            }
-
-            let opts = switcher::SwitchOptions {
-                no_restart,
-                skip: skip.to_vec(),
-                update_apache: false,
-                silent,
-                silent_if_unchanged,
+        Some(Commands::Info { version, json }) => cmd_info(&version, json)?,
+        Some(Commands::Doctor { json }) => return cmd_doctor(json),
+        Some(Commands::Restart { server }) => webserver::restart_explicit(server)?,
+        Some(Commands::Config { command }) => cmd_config(command)?,
+        Some(Commands::Init { shell }) => hooks::print(resolve_shell(shell)?),
+        Some(Commands::Completions { shell }) => {
+            let shell = match resolve_shell(shell)? {
+                ShellChoice::Bash => clap_complete::Shell::Bash,
+                ShellChoice::Zsh => clap_complete::Shell::Zsh,
+                ShellChoice::Fish => clap_complete::Shell::Fish,
             };
-
-            switcher::switch_version(&version_str, &opts)
+            let command = Cli::command();
+            // clap_complete includes hidden arguments, so remove the internal
+            // protocol flag from the completion-only command model.
+            let auto = command.find_subcommand("auto").unwrap();
+            let public_auto = clap::Command::new("auto")
+                .about(auto.get_about().unwrap().clone())
+                .args(
+                    auto.get_arguments()
+                        .filter(|arg| !arg.is_hide_set())
+                        .cloned(),
+                );
+            let mut command = command.mut_subcommand("auto", |_| public_auto);
+            clap_complete::generate(shell, &mut command, "pvm", &mut std::io::stdout());
         }
     }
+    Ok(0)
 }
-
-fn cmd_exec(version: &str, args: &[String]) -> Result<()> {
-    switcher::exec_version(version, args)
-}
-
-fn cmd_run(version: &str, script: &str, args: &[String]) -> Result<()> {
-    switcher::run_version(version, script, args)
-}
-
-fn cmd_info(version_str: &str) -> Result<()> {
+fn cmd_list(json_output: bool) -> Result<()> {
     let aliases = aliases::load_aliases()?;
-    let resolved = aliases::resolve_version_or_alias(version_str, &aliases);
-    let normalized = detector::normalize_version_str(&resolved);
-
-    let versions = detector::detect_php_versions();
-    let target = detector::find_version(&versions, &normalized).ok_or_else(|| {
-        let available: Vec<&str> = versions.iter().map(|v| v.version.as_str()).collect();
-        anyhow::anyhow!(
-            "PHP {} not found. Available: {}",
-            normalized,
-            available.join(", ")
+    let versions: Vec<_> = detector::detect_php_versions()
+        .iter()
+        .map(|v| output::VersionRecord::new(v, &aliases))
+        .collect();
+    if json_output {
+        output::json("list", json!({"versions": versions}), None)?;
+    } else {
+        output::list(&versions);
+    }
+    Ok(())
+}
+fn current() -> Result<detector::PhpVersion> {
+    let path = which::which("php")
+        .context("No active PHP found. Install PHP or check PATH; run pvm doctor")?;
+    let mut version = detector::probe_php_binary(&path).with_context(|| {
+        format!(
+            "PHP in PATH cannot execute successfully: {}. Run pvm doctor",
+            path.display()
         )
     })?;
-
-    let build_date =
-        detector::get_build_date(&target.binary_path).unwrap_or_else(|| "unknown".to_string());
-    let modules = detector::get_loaded_modules(&target.binary_path);
-    let (ini_path, scan_dir) = detector::probe_ini(&target.binary_path);
-
-    let alias_names: Vec<String> = aliases
-        .iter()
-        .filter(|(_, v)| {
-            let r = aliases::resolve_version_or_alias(v, &aliases);
-            detector::normalize_version_str(&r) == target.version || v.as_str() == target.version
-        })
-        .map(|(k, _)| k.clone())
-        .collect();
-
-    let status_str = if target.active {
-        format!("{} ✓", "active".green())
+    version.active = true;
+    Ok(version)
+}
+fn cmd_current(json_output: bool, short: bool) -> Result<()> {
+    let current = current()?;
+    if json_output {
+        output::json(
+            "current",
+            json!({"current": output::VersionRecord::new(&current, &aliases::load_aliases()?)}),
+            None,
+        )?;
+    } else if short {
+        println!("{}", current.version);
     } else {
-        "inactive".dimmed().to_string()
-    };
-
-    println!("{}", target.full_version.bold());
-    utils::horizontal_rule();
-    println!(
-        "  {:12} {}",
-        "Binary:".dimmed(),
-        target.binary_path.display()
-    );
-    if let Some(ref ini) = ini_path {
-        println!("  {:12} {}", "php.ini:".dimmed(), ini);
-    }
-    if let Some(ref scan) = scan_dir {
-        println!("  {:12} {}", "Scan dir:".dimmed(), scan);
-    }
-    println!("  {:12} {}", "Build date:".dimmed(), build_date);
-    println!("  {:12} {}", "Status:".dimmed(), status_str);
-    if !alias_names.is_empty() {
         println!(
-            "  {:12} {}",
-            "Alias:".dimmed(),
-            alias_names.join(", ").cyan()
+            "PHP {} ({})",
+            output::style(&current.version, "1;32", false),
+            current.binary_path.display()
         );
     }
-    utils::horizontal_rule();
-
-    if modules.is_empty() {
-        println!("{}", "Could not retrieve loaded modules.".dimmed());
-    } else {
-        println!("{}", format!("Loaded modules ({}):", modules.len()).bold());
-        println!("  {}", modules.join(", ").dimmed());
-    }
-
     Ok(())
 }
-
-fn cmd_doctor() -> Result<()> {
-    println!("{}", "pvm doctor".bold());
-    utils::horizontal_rule();
-
-    let versions = detector::detect_php_versions();
-    let active = detector::get_active_version(&versions);
-
-    match which::which("php") {
-        Ok(path) => {
-            check_ok(&format!("php found in PATH: {}", path.display()));
-
-            if let Some(av) = active {
-                let path_canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                let bin_canon = std::fs::canonicalize(&av.binary_path)
-                    .unwrap_or_else(|_| av.binary_path.clone());
-                if path_canon == bin_canon {
-                    check_ok(&format!(
-                        "Active PHP is {}: {}",
-                        av.version,
-                        av.binary_path.display()
-                    ));
-                } else {
-                    check_warn(&format!(
-                        "PATH php ({}) differs from managed php ({})",
-                        path.display(),
-                        av.binary_path.display()
-                    ));
-                }
-            } else {
-                check_warn("Could not determine which pvm-managed version is active");
-            }
-        }
-        Err(_) => {
-            check_fail("php not found in PATH — install PHP or check your shell config");
-        }
-    }
-
-    // 3. ~/.pvm/ is writable
-    match utils::ensure_pvm_dir() {
-        Ok(dir) => {
-            let test_file = dir.join(".write_test");
-            match std::fs::write(&test_file, "") {
-                Ok(_) => {
-                    let _ = std::fs::remove_file(&test_file);
-                    check_ok(&format!("~/.pvm/ is writable ({})", dir.display()));
-                }
-                Err(_) => {
-                    check_fail(&format!("~/.pvm/ is NOT writable: {}", dir.display()));
-                }
-            }
-        }
-        Err(e) => check_fail(&format!("Cannot access ~/.pvm/: {}", e)),
-    }
-
-    let bin_dirs: &[&str] = &["/usr/local/bin", "/opt/homebrew/bin"];
-    for dir_str in bin_dirs {
-        let dir = std::path::Path::new(dir_str);
-        if !dir.exists() {
-            continue;
-        }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            let broken: Vec<_> = entries
-                .flatten()
-                .filter(|e| {
-                    let name = e.file_name();
-                    let n = name.to_string_lossy();
-                    (n == "php" || n.starts_with("php"))
-                        && e.path().is_symlink()
-                        && !e.path().exists()
-                })
-                .map(|e| e.path())
-                .collect();
-
-            if broken.is_empty() {
-                check_ok(&format!("No broken PHP symlinks in {}", dir_str));
-            } else {
-                for p in &broken {
-                    check_fail(&format!("Broken symlink: {}", p.display()));
-                }
-            }
-        }
-    }
-
-    {
-        let path_val = std::env::var("PATH").unwrap_or_default();
-        let php_bins: Vec<_> = path_val
-            .split(':')
-            .filter_map(|dir| {
-                let p = std::path::Path::new(dir).join("php");
-                if p.exists() { Some(p) } else { None }
-            })
-            .collect();
-
-        if php_bins.len() <= 1 {
-            check_ok("No conflicting PHP binaries in PATH");
-        } else {
-            check_warn(&format!(
-                "{} php binaries found in PATH — only the first one is used",
-                php_bins.len()
-            ));
-            for bin in &php_bins {
-                println!("    {}", bin.display().to_string().dimmed());
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if which::which("brew").is_ok() {
-            let output = std::process::Command::new("brew")
-                .args(["list", "--formula"])
-                .output();
-            match output {
-                Ok(o) => {
-                    let stdout = String::from_utf8_lossy(&o.stdout);
-                    let php_formulas: Vec<&str> =
-                        stdout.lines().filter(|l| l.starts_with("php")).collect();
-                    if php_formulas.is_empty() {
-                        check_warn("No PHP formulas found in Homebrew");
-                    } else {
-                        check_ok(&format!(
-                            "Homebrew PHP formula(s) found: {}",
-                            php_formulas.join(", ")
-                        ));
-                    }
-                }
-                Err(_) => check_warn("Could not query Homebrew formula list"),
-            }
-        }
-    }
-
-    {
-        let home = dirs::home_dir();
-        let shell_files = [".zshrc", ".bashrc", ".bash_profile", ".profile"];
-        let mut found = false;
-        if let Some(home) = &home {
-            for file in &shell_files {
-                let path = home.join(file);
-                if path.exists()
-                    && let Ok(content) = std::fs::read_to_string(&path)
-                    && content.contains("pvm init")
-                {
-                    check_ok(&format!("Shell integration found in ~/{}", file));
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                let fish_conf = home.join(".config/fish/conf.d/pvm.fish");
-                if fish_conf.exists() {
-                    check_ok("Shell integration found in ~/.config/fish/conf.d/pvm.fish");
-                    found = true;
-                }
-            }
-        }
-        if !found {
-            check_warn(
-                "Shell integration not detected — add 'eval \"$(pvm init)\"' to your .zshrc/.bashrc, or run 'pvm init --shell fish | source' for fish",
-            );
-        }
-    }
-
-    utils::horizontal_rule();
-    Ok(())
+fn target(version: &str) -> Result<detector::PhpVersion> {
+    let resolved = aliases::resolve_version_or_alias(version, &aliases::load_aliases()?)?;
+    Ok(switcher::find_target(&detector::detect_php_versions(), &resolved)?.clone())
 }
-
-fn check_ok(msg: &str) {
-    println!("{} {}", "✓".green().bold(), msg);
-}
-
-fn check_warn(msg: &str) {
-    println!("{} {}", "⚠".yellow().bold(), msg);
-}
-
-fn check_fail(msg: &str) {
-    println!("{} {}", "✗".red().bold(), msg);
-}
-
-fn cmd_restart(server: Option<&str>) -> Result<()> {
-    match server {
-        Some("apache") => webserver::restart_server(webserver::WebServer::Apache),
-        Some("nginx") => webserver::restart_server(webserver::WebServer::Nginx),
-        Some(other) => anyhow::bail!("Unknown server '{}'. Use 'apache' or 'nginx'.", other),
-        None => {
-            let running = webserver::detect_running_servers();
-            if running.is_empty() {
-                let apache = webserver::detect_apache();
-                let nginx = webserver::detect_nginx();
-                if !apache && !nginx {
-                    println!("{}", "No supported web servers detected.".dimmed());
-                } else {
-                    println!("{}", "No web servers are currently running.".dimmed());
-                }
-                return Ok(());
-            }
-            for server in running {
-                webserver::restart_server(server)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn cmd_init(shell: Option<ShellChoice>) -> Result<()> {
-    let chosen = shell.or_else(|| {
-        let s = std::env::var("SHELL").unwrap_or_default();
-        if s.contains("zsh") {
-            Some(ShellChoice::Zsh)
-        } else if s.contains("bash") {
-            Some(ShellChoice::Bash)
-        } else if s.contains("fish") {
-            Some(ShellChoice::Fish)
-        } else {
-            None
-        }
-    });
-
-    match chosen {
-        Some(ShellChoice::Zsh) => print_zsh_hook(),
-        Some(ShellChoice::Bash) => print_bash_hook(),
-        Some(ShellChoice::Fish) => print_fish_hook(),
-        None => {
-            eprintln!(
-                "{} Could not detect shell. Pass --shell bash|zsh|fish explicitly.",
-                "warning:".yellow().bold()
-            );
-            print_zsh_hook();
-            println!();
-            println!("# --- Bash hook ---");
-            println!();
-            print_bash_hook();
-        }
-    }
-
-    Ok(())
-}
-
-fn cmd_completions(shell: Option<ShellChoice>) -> Result<()> {
-    use clap::CommandFactory;
-    use clap_complete::{Shell as ClapShell, generate};
-
-    let chosen = shell.or_else(|| {
-        let s = std::env::var("SHELL").unwrap_or_default();
-        if s.contains("zsh") {
-            Some(ShellChoice::Zsh)
-        } else if s.contains("bash") {
-            Some(ShellChoice::Bash)
-        } else if s.contains("fish") {
-            Some(ShellChoice::Fish)
-        } else {
-            None
-        }
-    });
-
-    let clap_shell = match chosen {
-        Some(ShellChoice::Bash) => ClapShell::Bash,
-        Some(ShellChoice::Zsh) => ClapShell::Zsh,
-        Some(ShellChoice::Fish) => ClapShell::Fish,
-        None => anyhow::bail!("Could not detect shell. Pass --shell bash|zsh|fish explicitly."),
+fn cmd_which(version: Option<&str>) -> Result<()> {
+    let path = match version {
+        Some(version) => target(version)?.binary_path,
+        None => which::which("php").context("php not found in PATH")?,
     };
-
-    let mut cmd = Cli::command();
-    generate(clap_shell, &mut cmd, "pvm", &mut std::io::stdout());
+    println!("{}", path.display());
     Ok(())
 }
-
-fn print_zsh_hook() {
-    println!(
-        r#"# pvm shell integration (zsh)
-# Add the following line to your ~/.zshrc:
-#   eval "$(pvm init)"
-
-autoload -U add-zsh-hook
-
-_pvm_auto_switch() {{
-  # Pure-shell directory walk — no subprocess on the hot path
-  local dir="$PWD" wanted="" f
-  while true; do
-    for f in .pvmrc .php-version .pvm; do
-      if [[ -f "$dir/$f" ]]; then
-        IFS= read -r wanted < "$dir/$f"
-        break 2
-      fi
-    done
-    [[ "$dir" == "/" ]] && break
-    dir="${{dir:h}}"
-  done
-
-  wanted="${{wanted//[[:space:]]/}}"
-
-  if [[ -z "$wanted" ]]; then
-    unset PVM_PHP_VERSION
-    return 0
-  fi
-
-  # Skip subprocess entirely if version is already correct
-  [[ "${{PVM_PHP_VERSION-}}" == "$wanted" ]] && return 0
-
-  command -v pvm &>/dev/null || return 0
-  if pvm auto --silent-if-unchanged 2>/dev/null; then
-    export PVM_PHP_VERSION="$wanted"
-  else
-    unset PVM_PHP_VERSION
-  fi
-}}
-
-add-zsh-hook chpwd _pvm_auto_switch
-_pvm_auto_switch  # run once on shell start"#
-    );
+fn cmd_use(version: Option<&str>, restart: RestartArgs, prompts: &impl Prompts) -> Result<()> {
+    let chosen = match version {
+        Some(version) => version.to_owned(),
+        None => {
+            if !prompts::interactive() {
+                bail!(
+                    "Version selection requires a terminal. Pass a version explicitly: pvm use 8.3"
+                );
+            }
+            let versions = detector::detect_php_versions();
+            if versions.is_empty() {
+                bail!("No PHP versions found. Install PHP using Homebrew or your package manager");
+            }
+            let labels = versions
+                .iter()
+                .map(|v| {
+                    format!(
+                        "{} {} {}",
+                        v.version,
+                        if v.active { "[active]" } else { "" },
+                        v.binary_path.display()
+                    )
+                })
+                .collect::<Vec<_>>();
+            let Some(index) = prompts.select(&labels, versions.iter().position(|v| v.active))?
+            else {
+                eprintln!("Selection cancelled; PHP unchanged.");
+                return Ok(());
+            };
+            versions
+                .get(index)
+                .context("Invalid picker selection")?
+                .version
+                .clone()
+        }
+    };
+    let result = switcher::switch_version(
+        &chosen,
+        &switcher::SwitchOptions {
+            restart,
+            update_apache: true,
+            hook: false,
+            quiet: false,
+        },
+    )?;
+    render_switch(&result, false, false, None)
 }
-
-fn print_bash_hook() {
-    println!(
-        r#"# pvm shell integration (bash)
-# Add the following line to your ~/.bashrc or ~/.bash_profile:
-#   eval "$(pvm init)"
-
-_pvm_auto_switch() {{
-  # Pure-shell directory walk — no subprocess on the hot path
-  local dir="$PWD" wanted="" f found=0
-  while true; do
-    for f in .pvmrc .php-version .pvm; do
-      if [[ -f "$dir/$f" ]]; then
-        IFS= read -r wanted < "$dir/$f"
-        found=1
-        break
-      fi
-    done
-    [[ "$found" -eq 1 || "$dir" == "/" ]] && break
-    dir="${{dir%/*}}"
-    [[ -z "$dir" ]] && dir="/"
-  done
-
-  wanted="${{wanted//[[:space:]]/}}"
-
-  if [[ -z "$wanted" ]]; then
-    unset PVM_PHP_VERSION
-    return 0
-  fi
-
-  # Skip subprocess entirely if version is already correct
-  [[ "${{PVM_PHP_VERSION-}}" == "$wanted" ]] && return 0
-
-  command -v pvm &>/dev/null || return 0
-  if pvm auto --silent-if-unchanged 2>/dev/null; then
-    export PVM_PHP_VERSION="$wanted"
-  else
-    unset PVM_PHP_VERSION
-  fi
-}}
-
-if [[ -z "${{PROMPT_COMMAND-}}" ]]; then
-  PROMPT_COMMAND="_pvm_auto_switch"
-else
-  PROMPT_COMMAND="_pvm_auto_switch;$PROMPT_COMMAND"
-fi
-_pvm_auto_switch  # run once on shell start"#
-    );
+fn render_switch(
+    result: &switcher::SwitchResult,
+    silent: bool,
+    silent_if_unchanged: bool,
+    source: Option<&std::path::Path>,
+) -> Result<()> {
+    if !silent && (!silent_if_unchanged || result.changed) {
+        let source = source
+            .map(|p| format!(" from {}", p.display()))
+            .unwrap_or_default();
+        eprintln!(
+            "{} PHP {} ({}){}",
+            if result.changed {
+                "Now using"
+            } else {
+                "Already using"
+            },
+            result.version,
+            result.binary_path.display(),
+            source
+        );
+        if result.apache != "skipped" {
+            eprintln!("Apache configuration: {}", result.apache);
+        }
+        for outcome in &result.restarts {
+            eprintln!("{}: {}", outcome.server.name(), outcome.status);
+            if let Some(notice) = &outcome.notice {
+                eprintln!("  {notice}");
+            }
+        }
+    }
+    if !result.errors.is_empty() {
+        bail!(
+            "PHP {} is active, but post-switch actions failed: {}",
+            result.version,
+            result.errors.join("; ")
+        );
+    }
+    Ok(())
 }
-
-fn print_fish_hook() {
-    println!(
-        r#"# pvm shell integration (fish)
-# Save this to ~/.config/fish/conf.d/pvm.fish
-# or run: pvm init --shell fish | source
-
-function _pvm_auto_switch --on-variable PWD
-  # Pure-shell directory walk — no subprocess on the hot path
-  set -l dir $PWD
-  set -l wanted ""
-  while true
-    for f in .pvmrc .php-version .pvm
-      if test -f "$dir/$f"
-        read -l line < "$dir/$f"
-        set wanted (string trim $line)
-        break
-      end
-    end
-    if test -n "$wanted"; or test "$dir" = "/"
-      break
-    end
-    set dir (string replace -r '/[^/]*$' '' $dir)
-    if test -z "$dir"
-      set dir "/"
-    end
-  end
-
-  if test -z "$wanted"
-    set -eg PVM_PHP_VERSION
-    return 0
-  end
-
-  # Skip subprocess entirely if version is already correct
-  if set -q PVM_PHP_VERSION; and test "$PVM_PHP_VERSION" = "$wanted"
-    return 0
-  end
-
-  command -v pvm > /dev/null 2>&1 || return 0
-  if pvm auto --silent-if-unchanged 2>/dev/null
-    set -gx PVM_PHP_VERSION $wanted
-  else
-    set -eg PVM_PHP_VERSION
-  end
-end
-
-_pvm_auto_switch"#
+fn cmd_alias(name: Option<&str>, value: Option<&str>) -> Result<()> {
+    if let (Some(name), Some(value)) = (name, value) {
+        aliases::set_alias(name, value)?;
+        eprintln!("Alias {name} → {value}");
+        return Ok(());
+    }
+    let aliases = aliases::load_aliases()?;
+    if let Some(name) = name {
+        let value = aliases
+            .get(name)
+            .with_context(|| format!("Alias '{name}' not found"))?;
+        println!("{name} → {value}");
+    } else {
+        let mut values: Vec<_> = aliases.iter().collect();
+        values.sort_by_key(|(name, _)| *name);
+        if values.is_empty() {
+            println!("No aliases defined. Use pvm alias default 8.3");
+        }
+        for (name, value) in values {
+            println!("{name} → {value}");
+        }
+    }
+    Ok(())
+}
+fn cmd_pin(version: Option<&str>, force: bool) -> Result<()> {
+    let _lock = state::StateLock::acquire(false)?;
+    let pin = match version {
+        Some(value) => aliases::canonical_request(value, &aliases::load_aliases()?)?,
+        None => current()?.version,
+    };
+    let cwd = std::env::current_dir().context("Cannot determine current directory")?;
+    let changed = pvmrc::write_pvmrc(&cwd, &pin, force)?;
+    eprintln!(
+        "{} PHP {pin} in {}",
+        if changed { "Pinned" } else { "Already pinned" },
+        cwd.join(".pvmrc").display()
     );
+    Ok(())
+}
+fn cmd_auto(silent: bool, unchanged: bool, restart: RestartArgs, hook: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("Cannot determine current directory")?;
+    let Some(path) = pvmrc::find_pvmrc(&cwd) else {
+        if !silent && !unchanged && !hook {
+            eprintln!("No version file (.pvmrc, .php-version, .pvm) found. Use pvm pin 8.3");
+        }
+        return Ok(());
+    };
+    let version = pvmrc::read_pvmrc(&path)?;
+    if version.is_empty() {
+        if !silent && !unchanged && !hook {
+            eprintln!("Empty {} — nothing to do", path.display());
+        }
+        return Ok(());
+    }
+    let result = switcher::switch_version(
+        &version,
+        &switcher::SwitchOptions {
+            restart,
+            update_apache: false,
+            hook,
+            quiet: silent,
+        },
+    )
+    .with_context(|| format!("Activation from {} failed", path.display()))?;
+    if hook {
+        println!(
+            "{}\t{}\t{}",
+            result.token,
+            result.version,
+            u8::from(result.changed)
+        );
+        Ok(())
+    } else {
+        render_switch(&result, silent, unchanged, Some(&path))
+    }
+}
+fn cmd_info(version: &str, json_output: bool) -> Result<()> {
+    let version = target(version)?;
+    let record = output::VersionRecord::new(&version, &aliases::load_aliases()?);
+    let (ini_path, scan_dir) = detector::probe_ini(&version.binary_path);
+    let build_date = detector::get_build_date(&version.binary_path);
+    let modules = detector::get_loaded_modules(&version.binary_path);
+    if json_output {
+        let mut info = serde_json::to_value(&record)?;
+        let object = info.as_object_mut().unwrap();
+        object.insert("ini_path".into(), json!(ini_path));
+        object.insert("scan_dir".into(), json!(scan_dir));
+        object.insert("build_date".into(), json!(build_date));
+        object.insert("modules".into(), json!(modules));
+        output::json("info", json!({"version": info}), None)?;
+    } else {
+        println!("{}", version.full_version);
+        println!("Binary:     {}", version.binary_path.display());
+        println!(
+            "Status:     {}",
+            if version.active { "active" } else { "inactive" }
+        );
+        println!("Aliases:    {}", record.aliases.join(", "));
+        println!("php.ini:    {}", ini_path.as_deref().unwrap_or("unknown"));
+        println!("Scan dir:   {}", scan_dir.as_deref().unwrap_or("unknown"));
+        println!("Build date: {}", build_date.as_deref().unwrap_or("unknown"));
+        println!(
+            "Modules:    {}",
+            modules
+                .map(|m| m.join(", "))
+                .unwrap_or_else(|| "unknown".into())
+        );
+    }
+    Ok(())
+}
+fn cmd_doctor(json_output: bool) -> Result<i32> {
+    let report = doctor::inspect();
+    if json_output {
+        output::json("doctor", &report, None)?;
+    } else {
+        for check in &report.checks {
+            let (label, color) = match check.status {
+                "passed" => ("OK", "32"),
+                "warning" => ("WARN", "33"),
+                _ => ("FAIL", "31"),
+            };
+            println!("{} {}", output::style(label, color, false), check.message);
+            if let Some(remediation) = &check.remediation {
+                println!("  {remediation}");
+            }
+        }
+        println!(
+            "{} passed, {} warnings, {} failed",
+            report.summary.passed, report.summary.warning, report.summary.failed
+        );
+    }
+    Ok(i32::from(report.summary.failed > 0))
+}
+fn cmd_config(command: ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Get { key } => {
+            let effective = utils::Config::load()?.effective();
+            if let Some(key) = key {
+                println!(
+                    "{}",
+                    effective
+                        .get(&key)
+                        .with_context(|| format!("Unknown configuration key '{key}'"))?
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| effective[&key].to_string())
+                );
+            } else {
+                println!("{}", serde_json::to_string_pretty(&effective)?);
+            }
+        }
+        ConfigCommand::Set { key, value } => {
+            let _lock = state::StateLock::acquire(false)?;
+            let mut config = utils::Config::load()?;
+            config.set(&key, &value)?;
+            config.save()?;
+            state::publish(&config)?;
+            eprintln!("{key} = {value}");
+        }
+    }
+    Ok(())
+}
+fn resolve_shell(shell: Option<ShellChoice>) -> Result<ShellChoice> {
+    shell
+        .or_else(|| {
+            match std::env::var_os("SHELL")
+                .as_deref()
+                .and_then(|s| std::path::Path::new(s).file_name())
+                .and_then(|s| s.to_str())
+            {
+                Some("bash") => Some(ShellChoice::Bash),
+                Some("zsh") => Some(ShellChoice::Zsh),
+                Some("fish") => Some(ShellChoice::Fish),
+                _ => None,
+            }
+        })
+        .context("Could not detect shell. Pass --shell bash|zsh|fish explicitly")
 }

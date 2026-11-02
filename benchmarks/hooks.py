@@ -41,7 +41,8 @@ def make_driver(shell, hook, targets, iterations, clear_cache, cached):
     if shell == "fish":
         lines = ["source " + quote(hook), "set -eg PVM_PHP_VERSION"]
         if cached:
-            lines.append("set -gx PVM_PHP_VERSION 8.3")
+            source = next(parent / ".pvmrc" for parent in targets[0].parents if (parent / ".pvmrc").is_file())
+            lines += ["set -g PVM_PHP_VERSION 8.3", "set -g _PVM_CACHE benchmark " + quote(source)]
         lines += [
             "printf 'PVM_BENCH_READY\\n'",
             "read -l pvm_bench_start",
@@ -63,7 +64,8 @@ def make_driver(shell, hook, targets, iterations, clear_cache, cached):
     else:
         lines = ["source " + quote(hook), "unset PVM_PHP_VERSION"]
         if cached:
-            lines.append("export PVM_PHP_VERSION=8.3")
+            source = next(parent / ".pvmrc" for parent in targets[0].parents if (parent / ".pvmrc").is_file())
+            lines += ["PVM_PHP_VERSION=8.3", "_PVM_TOKEN=benchmark", "_PVM_SOURCE=" + quote(source)]
         lines += [
             "printf 'PVM_BENCH_READY\\n'", "IFS= read -r pvm_bench_start",
             "i=0", "while (( i < " + str(iterations) + " )); do", "  (( i += 1 ))",
@@ -171,8 +173,9 @@ def benchmark_hooks(binary, shells=None, *, iterations=100, samples=5, depth=5,
         for group in ("unversioned", "same", "alternating"):
             paths = []
             for index in range(2):
-                project = work / group / ("project" + str(index))
-                nested = project.joinpath(*("level" + str(i) for i in range(depth)))
+                project = work / group / ("project" if group == "same" else "project" + str(index))
+                base = project / ("branch" + str(index)) if group == "same" else project
+                nested = base.joinpath(*("level" + str(i) for i in range(depth)))
                 nested.mkdir(parents=True)
                 if group != "unversioned":
                     version = "8.2" if group == "alternating" and index == 0 else "8.3"
@@ -191,12 +194,19 @@ def benchmark_hooks(binary, shells=None, *, iterations=100, samples=5, depth=5,
             "if [ \"$PVM_BENCH_DELAY\" != 0 ]; then\n"
             "  /bin/sleep \"$PVM_BENCH_DELAY\"\n"
             "fi\n"
+            "if [ \"$2\" = --hook ] && [ \"$PVM_BENCH_FAIL\" = 0 ]; then\n"
+            "  printf 'benchmark\\t8.3\\t0\\n'\n"
+            "fi\n"
             "exit \"$PVM_BENCH_FAIL\"\n"
         )
         stub.chmod(0o755)
         environment = os.environ.copy()
-        # Leave HOME untouched; no benchmark operation reads/writes pvm state.
+        # Hook-state reads use a fully isolated home; never inspect the user's state.
+        fixture_home = work / "home"
+        (fixture_home / ".pvm").mkdir(parents=True)
+        (fixture_home / ".pvm/hook-state").write_text("benchmark\t1\n")
         environment.update({
+            "HOME": str(fixture_home),
             "PATH": str(stub_dir) + os.pathsep + environment.get("PATH", ""),
             "PVM_BENCH_LOG": str(work / "calls.log"),
             "PVM_BENCH_DELAY": str(auto_delay_ms / 1000) if auto_delay_ms else "0",

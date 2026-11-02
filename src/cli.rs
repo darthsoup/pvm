@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::ffi::OsString;
 
 #[derive(ValueEnum, Clone, Debug)]
 pub enum ShellChoice {
@@ -6,150 +7,193 @@ pub enum ShellChoice {
     Zsh,
     Fish,
 }
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+pub enum ColorChoice {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
 
 #[derive(Parser)]
-#[command(
-    name = "pvm",
-    version,
-    about = "PHP Version Manager — switch PHP versions globally or per-project",
-    long_about = None
-)]
+#[command(name = "pvm", version, help_template = ROOT_HELP, about = "PHP Version Manager — global switching with project version files",
+    after_help = "Examples:\n  pvm use 8.3\n  pvm pin 8.3\n  pvm exec 8.3 -- php artisan migrate\n  eval \"$(pvm init --shell zsh)\"\n\nSwitching is global and can affect other terminals. Patch suffixes select a major/minor release line.")]
 pub struct Cli {
-    /// List all installed PHP versions (alias for 'list')
+    /// List installed PHP versions (alias for list)
     #[arg(short = 'l', long = "list")]
     pub list: bool,
-
-    /// Verbose output
-    #[arg(short = 'v', long = "verbose", global = true)]
+    /// Explain version resolution, discovery, and switching on stderr
+    #[arg(short = 'v', long, global = true)]
     pub verbose: bool,
-
+    /// Control color (explicit choice overrides NO_COLOR)
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    pub color: ColorChoice,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
-
+#[derive(Args, Clone, Default, Debug)]
+pub struct RestartArgs {
+    /// Restart running web servers without prompting
+    #[arg(long, conflicts_with = "no_restart")]
+    pub restart: bool,
+    /// Skip all web server restarts
+    #[arg(long)]
+    pub no_restart: bool,
+    /// Skip this server, even with --restart
+    #[arg(long, value_enum, value_name = "SERVER")]
+    pub skip: Vec<crate::webserver::WebServer>,
+}
+#[derive(Subcommand)]
+pub enum ConfigCommand {
+    /// Show effective settings, or one setting
+    Get { key: Option<String> },
+    /// Set auto_switch (true/false) or restart_webserver (ask/always/never)
+    Set { key: String, value: String },
+}
 #[derive(Subcommand)]
 pub enum Commands {
-    /// List all installed PHP versions
-    #[command(alias = "ls")]
-    List,
-
-    /// Show the currently active PHP version and path
-    Current,
-
-    /// Print the binary path for a specific version or alias
+    /// List installed PHP versions
+    #[command(visible_alias = "ls")]
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the active PHP version and binary path
+    Current {
+        #[arg(long, conflicts_with = "short")]
+        json: bool,
+        /// Print only the major/minor release line
+        #[arg(long)]
+        short: bool,
+    },
+    /// Print only the binary path for the active PHP, a version, or an alias
     Which {
-        /// Version string or alias name (e.g. "8.2" or "default")
+        /// Installed release line or defined alias (omitting it uses PATH)
         version: Option<String>,
     },
-
-    /// Switch the global PHP version (interactive picker if no version given)
+    /// Switch global PHP (keyboard picker when VERSION is omitted)
     Use {
-        /// Version string, alias name, or "default"
+        /// Release line or defined alias, such as 8.3 or default
         version: Option<String>,
-
-        /// Skip web server restart
-        #[arg(long)]
-        no_restart: bool,
-
-        /// Skip restarting a specific server (apache or nginx)
-        #[arg(long, value_name = "SERVER")]
-        skip: Vec<String>,
+        #[command(flatten)]
+        restart: RestartArgs,
     },
-
-    /// Manage named aliases (list all if no args given)
+    /// Show information about an installed version or alias
+    Info {
+        /// Installed release line or defined alias
+        version: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage named aliases (no arguments lists aliases)
     Alias {
-        /// Alias name to create or update
         name: Option<String>,
-
-        /// PHP version the alias should point to
         version: Option<String>,
     },
-
-    /// Remove a named alias
-    Unalias {
-        /// Name of the alias to remove
-        name: String,
-    },
-
-    /// Write a .pvmrc file in the current directory
+    /// Remove an alias (dependent aliases must be removed first)
+    Unalias { name: String },
+    /// Write .pvmrc; valid versions need not be installed
     Pin {
-        /// Version or alias to pin (defaults to currently active version)
+        /// Version or alias (defaults to active PHP)
         version: Option<String>,
-    },
-
-    /// Read .pvmrc, .php-version, or .pvm from cwd or parent directories and switch to that version
-    Auto {
-        /// Suppress all output (used by shell hook)
+        /// Replace a different existing .pvmrc
         #[arg(long)]
+        force: bool,
+    },
+    /// Read the nearest .pvmrc, .php-version, or .pvm and switch global PHP
+    Auto {
+        /// Suppress normal output; retain errors
+        #[arg(long, conflicts_with = "silent_if_unchanged")]
         silent: bool,
-
-        /// Suppress output only when PHP version is already correct (better for cd hooks)
+        /// Suppress normal output when no switch is needed
         #[arg(long)]
         silent_if_unchanged: bool,
-
-        /// Skip web server restart
-        #[arg(long)]
-        no_restart: bool,
-
-        /// Skip restarting a specific server
-        #[arg(long, value_name = "SERVER")]
-        skip: Vec<String>,
+        #[command(flatten)]
+        restart: RestartArgs,
+        #[arg(long, hide = true)]
+        hook: bool,
     },
-
-    /// Run a command with a specific PHP version in PATH (no global switch)
-    ///
-    /// Example: pvm exec 8.1 -- php artisan migrate
-    Exec {
-        /// PHP version to use
-        version: String,
-
-        /// Command and arguments (everything after --)
-        #[arg(last = true, required = true)]
-        args: Vec<String>,
-    },
-
-    /// Run a PHP script directly with a specific version
-    ///
-    /// Example: pvm run 8.3 index.php arg1 arg2
-    Run {
-        /// PHP version to use
-        version: String,
-
-        /// PHP script path
-        script: String,
-
-        /// Arguments to pass to the script
-        args: Vec<String>,
-    },
-
-    /// Show detailed information about a PHP version
-    Info {
-        /// Version string or alias name
-        version: String,
-    },
-
-    /// Check for common configuration issues
-    Doctor,
-
-    /// Restart web servers
-    Restart {
-        /// Specific server to restart: apache or nginx
-        server: Option<String>,
-    },
-
-    /// Print shell integration script (add: eval "$(pvm init)" to .zshrc/.bashrc)
+    /// Print shell integration; reload your shell after upgrading PVM
     Init {
-        /// Shell to generate integration for (auto-detected from $SHELL if not given)
         #[arg(long, value_enum)]
         shell: Option<ShellChoice>,
     },
-
+    /// Run a command with a version in PATH, without switching global PHP
+    #[command(after_help = "Example: pvm exec 8.3 -- php artisan migrate")]
+    Exec {
+        /// Installed release line or defined alias
+        version: String,
+        #[arg(last = true, required = true)]
+        args: Vec<OsString>,
+    },
+    /// Run a PHP script; every argument after SCRIPT is forwarded
+    #[command(
+        after_help = "Example: pvm run -v 8.3 index.php --filter=users\nPVM options must precede SCRIPT.",
+        override_usage = "pvm run [OPTIONS] <VERSION> <SCRIPT> [ARGS]..."
+    )]
+    Run {
+        /// Installed release line or defined alias
+        version: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1.., required = true, value_name = "SCRIPT")]
+        command: Vec<OsString>,
+    },
+    /// Check configuration; failed checks return status 1
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restart one server, or all running supported servers
+    Restart {
+        #[arg(value_enum)]
+        server: Option<crate::webserver::WebServer>,
+    },
+    /// Read or update configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
     /// Print shell completions to stdout
-    ///
-    /// Example: pvm completions --shell zsh > ~/.zsh/completions/_pvm
     Completions {
-        /// Shell to generate completions for
         #[arg(long, value_enum)]
         shell: Option<ShellChoice>,
     },
+}
+impl Cli {
+    pub fn json_command(&self) -> Option<&'static str> {
+        match self.command {
+            Some(Commands::List { json: true }) => Some("list"),
+            Some(Commands::Current { json: true, .. }) => Some("current"),
+            Some(Commands::Info { json: true, .. }) => Some("info"),
+            Some(Commands::Doctor { json: true }) => Some("doctor"),
+            _ => None,
+        }
+    }
+}
+const ROOT_HELP: &str = "{about}\n\nUsage: {usage}\n\nEveryday commands:\n  list (ls)    List installed versions\n  current      Show active PHP\n  which        Print a binary path\n  use          Switch global PHP\n  info         Show PHP details\n\nProject setup:\n  alias        Manage named aliases\n  unalias      Remove an alias\n  pin          Write .pvmrc\n  auto         Activate the nearest project version\n  init         Print shell integration\n\nExecution:\n  exec         Run a command with a PHP version\n  run          Run a PHP script with a version\n\nMaintenance:\n  doctor       Diagnose configuration\n  restart      Restart web servers\n  config       Read or update settings\n  completions  Print shell completions\n  help         Show command help\n\nOptions:\n{options}\n{after-help}\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parser_contracts() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        for args in [
+            vec!["pvm", "use", "--restart", "--no-restart"],
+            vec!["pvm", "use", "--skip", "apach"],
+            vec!["pvm", "current", "--short", "--json"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli =
+            Cli::try_parse_from(["pvm", "run", "8.3", "index.php", "--help", "-v", "--weird"])
+                .unwrap();
+        let Some(Commands::Run { command, .. }) = cli.command else {
+            panic!()
+        };
+        assert_eq!(
+            command,
+            ["index.php", "--help", "-v", "--weird"].map(OsString::from)
+        );
+    }
 }

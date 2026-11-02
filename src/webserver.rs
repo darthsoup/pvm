@@ -1,11 +1,14 @@
+use crate::prompts::Prompts;
 use anyhow::{Context, Result};
-use colored::Colorize;
+use clap::ValueEnum;
+use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
 
-use crate::utils::{Config, is_command_available, prompt_yes_no};
+use crate::utils::{Config, is_command_available};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum WebServer {
     Apache,
     Nginx,
@@ -81,68 +84,108 @@ pub fn is_running(server: WebServer) -> bool {
 pub fn restart_server(server: WebServer) -> Result<()> {
     let (cmd, args) = server.restart_cmd();
 
-    let status = Command::new(cmd)
-        .args(&args)
-        .status()
-        .with_context(|| format!("Failed to run {} {}", cmd, args.join(" ")));
-
-    let succeeded = match status {
-        Ok(s) => s.success(),
-        Err(_) => false,
-    };
-
-    if !succeeded {
-        let sudo_status = Command::new("sudo")
-            .arg(cmd)
-            .args(&args)
-            .status()
-            .with_context(|| format!("Failed to run sudo {} {}", cmd, args.join(" ")))?;
-        if !sudo_status.success() {
-            anyhow::bail!("Failed to restart {}", server.name());
+    if crate::prompts::interrupted() {
+        return Err(crate::prompts::Interrupted.into());
+    }
+    if let Err(first_error) = crate::utils::command_output(Command::new(cmd).args(&args)) {
+        let mut sudo = Command::new("sudo");
+        if !crate::prompts::interactive() {
+            sudo.arg("-n");
         }
+        crate::utils::command_output(sudo.arg(cmd).args(&args)).with_context(|| {
+            format!(
+                "Failed to restart {}. Unprivileged attempt: {first_error:#}",
+                server.name()
+            )
+        })?;
     }
 
-    println!("{} {} restarted", "✓".green(), server.name());
     Ok(())
 }
 
-pub struct RestartOpts<'a> {
-    pub no_restart: bool,
-    pub skip: &'a [String],
-    pub silent: bool,
+#[derive(Debug, Serialize)]
+pub struct RestartOutcome {
+    pub server: WebServer,
+    pub status: String,
+    pub error: Option<String>,
+    pub notice: Option<String>,
 }
 
-pub fn handle_post_switch_restart(opts: &RestartOpts) -> Result<()> {
+pub fn handle_post_switch_restart(
+    opts: &crate::cli::RestartArgs,
+    config: &Config,
+    prompts: &impl Prompts,
+    quiet: bool,
+) -> Result<Vec<RestartOutcome>> {
+    let mut outcomes = Vec::new();
     if opts.no_restart {
-        return Ok(());
+        return Ok(outcomes);
     }
-
-    let config = Config::load().unwrap_or_default();
-    let policy = config.restart_policy();
-
     for server in detect_running_servers() {
-        let name_lower = server.name().to_lowercase();
-        if opts.skip.iter().any(|s| s.to_lowercase() == name_lower) {
+        if opts.skip.contains(&server) {
             continue;
         }
-
-        let should_restart = match policy {
-            "always" => true,
-            "never" => false,
-            _ => {
-                if opts.silent {
-                    false // no prompts in shell-hook mode
-                } else {
-                    prompt_yes_no(&format!("{} is running. Restart it?", server.name()), true)
-                }
-            }
+        let interactive = !quiet && crate::prompts::interactive();
+        let restart =
+            restart_decision(server, opts, config.restart_policy(), interactive, prompts)?;
+        let notice =
+            (!restart && !interactive && !opts.restart && config.restart_policy() == "ask")
+                .then(|| "No interactive confirmation; use --restart or --no-restart".to_owned());
+        let error = if restart {
+            restart_server(server).err().map(|e| format!("{e:#}"))
+        } else {
+            None
         };
-
-        if should_restart {
-            restart_server(server)?;
-        }
+        outcomes.push(RestartOutcome {
+            server,
+            status: if error.is_some() {
+                "failed"
+            } else if restart {
+                "restarted"
+            } else {
+                "skipped"
+            }
+            .into(),
+            error,
+            notice,
+        });
     }
+    Ok(outcomes)
+}
 
+fn restart_decision(
+    server: WebServer,
+    opts: &crate::cli::RestartArgs,
+    policy: &str,
+    interactive: bool,
+    prompts: &impl Prompts,
+) -> Result<bool> {
+    if opts.no_restart || opts.skip.contains(&server) {
+        return Ok(false);
+    }
+    if opts.restart {
+        return Ok(true);
+    }
+    match policy {
+        "always" => Ok(true),
+        "never" => Ok(false),
+        _ if interactive => prompts.confirm(&format!("{} is running. Restart it?", server.name())),
+        _ => Ok(false),
+    }
+}
+
+pub fn restart_explicit(server: Option<WebServer>) -> Result<()> {
+    let _lock = crate::state::StateLock::acquire(false)?;
+    let servers = server
+        .map(|s| vec![s])
+        .unwrap_or_else(detect_running_servers);
+    if servers.is_empty() {
+        eprintln!("No supported web servers are currently running.");
+    }
+    for server in servers {
+        restart_server(server)?;
+        eprintln!("{} restarted", server.name());
+    }
     Ok(())
 }
 
@@ -151,6 +194,7 @@ pub fn update_apache_config(php_version: &str) -> Result<()> {
         "/etc/apache2/httpd.conf",
         "/etc/httpd/conf/httpd.conf",
         "/usr/local/etc/httpd/httpd.conf",
+        "/opt/homebrew/etc/httpd/httpd.conf",
     ];
 
     for path_str in &config_paths {
@@ -167,6 +211,29 @@ fn update_apache_config_file(path: &Path, php_version: &str) -> Result<()> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
 
+    let php_ver_nodot = php_version.replace('.', "");
+    let module_candidates = [
+        format!("/usr/local/lib/httpd/modules/libphp{}.so", php_version),
+        format!("/opt/homebrew/lib/httpd/modules/libphp{}.so", php_version),
+        format!("/usr/lib/apache2/modules/libphp{}.so", php_ver_nodot),
+        format!("/usr/lib/apache2/modules/libphp{}.so", php_version),
+        String::from("/usr/lib/apache2/modules/libphp.so"),
+    ];
+
+    let has_php = content
+        .lines()
+        .any(|line| line.trim_start().starts_with("LoadModule php"));
+    if !has_php {
+        return Ok(());
+    }
+    let module = module_candidates
+        .iter()
+        .find(|p| Path::new(p.as_str()).exists())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No Apache module found for PHP {php_version}; existing configuration retained"
+            )
+        })?;
     let backup = {
         let mut b = path.to_path_buf();
         b.set_extension("conf.pvm.bak");
@@ -188,18 +255,6 @@ fn update_apache_config_file(path: &Path, php_version: &str) -> Result<()> {
         }
     }
 
-    let php_ver_nodot = php_version.replace('.', "");
-    let module_candidates = [
-        format!("/usr/local/lib/httpd/modules/libphp{}.so", php_version),
-        format!("/opt/homebrew/lib/httpd/modules/libphp{}.so", php_version),
-        format!("/usr/lib/apache2/modules/libphp{}.so", php_ver_nodot),
-        format!("/usr/lib/apache2/modules/libphp{}.so", php_version),
-        String::from("/usr/lib/apache2/modules/libphp.so"),
-    ];
-
-    if let Some(module) = module_candidates
-        .iter()
-        .find(|p| Path::new(p.as_str()).exists())
     {
         let new_line = format!("LoadModule php_module {}", module);
         // Insert after the last commented-out LoadModule php line so the
@@ -213,5 +268,54 @@ fn update_apache_config_file(path: &Path, php_version: &str) -> Result<()> {
     }
 
     let new_content = lines.join("\n");
-    std::fs::write(path, new_content).with_context(|| format!("Failed to write {}", path.display()))
+    crate::utils::atomic_write(path, format!("{new_content}\n").as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Confirm(bool);
+    impl Prompts for Confirm {
+        fn select(&self, _: &[String], _: Option<usize>) -> Result<Option<usize>> {
+            panic!("unexpected picker")
+        }
+        fn confirm(&self, _: &str) -> Result<bool> {
+            Ok(self.0)
+        }
+    }
+    #[test]
+    fn restart_precedence_and_noninteractive_policy() {
+        let mut opts = crate::cli::RestartArgs::default();
+        assert!(!restart_decision(WebServer::Apache, &opts, "ask", false, &Confirm(true)).unwrap());
+        assert!(!restart_decision(WebServer::Apache, &opts, "ask", true, &Confirm(false)).unwrap());
+        assert!(restart_decision(WebServer::Apache, &opts, "ask", true, &Confirm(true)).unwrap());
+        assert!(
+            restart_decision(WebServer::Apache, &opts, "always", false, &Confirm(false)).unwrap()
+        );
+        opts.restart = true;
+        assert!(
+            restart_decision(WebServer::Apache, &opts, "never", false, &Confirm(false)).unwrap()
+        );
+        opts.skip.push(WebServer::Apache);
+        assert!(
+            !restart_decision(WebServer::Apache, &opts, "always", true, &Confirm(true)).unwrap()
+        );
+        opts.skip.clear();
+        opts.no_restart = true;
+        assert!(
+            !restart_decision(WebServer::Apache, &opts, "always", true, &Confirm(true)).unwrap()
+        );
+    }
+    #[test]
+    fn apache_without_php_directives_is_not_modified_or_backed_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("httpd.conf");
+        std::fs::write(&path, "ServerName localhost\n").unwrap();
+        update_apache_config_file(&path, "99.1").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "ServerName localhost\n"
+        );
+        assert!(!temp.path().join("httpd.conf.pvm.bak").exists());
+    }
 }

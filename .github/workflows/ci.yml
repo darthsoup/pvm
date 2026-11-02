@@ -48,8 +48,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install test shells (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+      - name: Install test shells (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-features
+        env:
+          PVM_REQUIRED_SHELLS: ${{ runner.os != 'Windows' && 'bash,zsh,fish' || '' }}
 
   benchmarks:
     name: Benchmark checks (${{ matrix.os }})

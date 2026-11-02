@@ -13,7 +13,7 @@ from benchmarks.commands import benchmark_command_pair
 
 def result():
     return {
-        "schema_version": 1, "platform": "test-machine", "iterations": 100,
+        "schema_version": 1, "hook_fixture_version": 2, "platform": "test-machine", "iterations": 100,
         "samples": 5, "depth": 5, "auto_delay_ms": 0, "include_discovery": False,
         "discovery_iterations": 3, "help_startup": {"median_ms": 5.0},
         "hooks": [{"shell": "zsh", "case": "cached", "median_ms": 0.05}],
@@ -43,7 +43,7 @@ class BaselineComparisonTests(unittest.TestCase):
 
     def test_mismatched_workloads_are_rejected(self):
         baseline = result()
-        for field, value in (("platform", "other-machine"), ("depth", 20), ("auto_delay_ms", 10)):
+        for field, value in (("hook_fixture_version", 1), ("platform", "other-machine"), ("depth", 20), ("auto_delay_ms", 10)):
             with self.subTest(field=field):
                 current = deepcopy(baseline)
                 current[field] = value

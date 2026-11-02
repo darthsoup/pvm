@@ -25,8 +25,22 @@ pub fn read_pvmrc(path: &Path) -> Result<String> {
     Ok(content.trim().to_string())
 }
 
-pub fn write_pvmrc(dir: &Path, version: &str) -> Result<()> {
+pub fn write_pvmrc(dir: &Path, version: &str, force: bool) -> Result<bool> {
     let path = dir.join(".pvmrc");
-    std::fs::write(&path, format!("{}\n", version))
-        .with_context(|| format!("Failed to write {}", path.display()))
+    if path.exists() {
+        let previous = read_pvmrc(&path)?;
+        if previous == version {
+            return Ok(false);
+        }
+        if !force {
+            anyhow::bail!(
+                "{} already pins '{}'. Use pvm pin --force {} to replace it",
+                path.display(),
+                previous,
+                version
+            );
+        }
+    }
+    crate::utils::atomic_write(&path, format!("{version}\n").as_bytes())?;
+    Ok(true)
 }
