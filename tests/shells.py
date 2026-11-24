@@ -1,5 +1,6 @@
 """Isolated generated-hook and PTY checks. Never switch real PHP or services."""
 import errno
+import json
 import os
 from pathlib import Path
 import pty
@@ -142,18 +143,72 @@ printf '%s\\t8.3\\t0\\n' "$token"
         self.assertEqual(count, 2)
         self.assertIn('survived', result.stdout)
 
+    def use_real_backend(self):
+        self.stub.unlink()
+        self.stub.symlink_to(BINARY)
+        self.env['PATH'] = str(self.bin)
+        for name, body in {
+            'php': 'echo "PHP 99.1.0"',
+            'php99.2': 'echo "PHP 99.2.0"',
+            'brew': 'echo fake-backend-failure >&2; exit 1',
+            'update-alternatives': 'echo fake-backend-failure >&2; exit 1',
+        }.items():
+            path = self.bin / name
+            path.write_text('#!/bin/sh\n' + body + '\n')
+            path.chmod(0o755)
+
+    def test_activation_uses_the_pin_from_logical_ancestry(self):
+        self.use_real_backend()
+        (self.project / '.pvmrc').write_text('99.1')
+        physical = self.root / 'physical'
+        (physical / 'sub').mkdir(parents=True)
+        (physical / '.pvmrc').write_text('invalid')
+        (self.project / 'link').symlink_to(physical / 'sub')
+        for shell, executable in SHELLS.items():
+            if executable:
+                with self.subTest(shell=shell):
+                    result, _ = self.run_shell(shell, ['cd link', 'echo "$PVM_PHP_VERSION"'])
+                    self.assertEqual(result.stdout.strip(), '99.1', result.stderr)
+                    self.assertEqual(result.stderr, '')
+
+    def test_backend_failure_rotates_token_but_only_warns_once(self):
+        self.use_real_backend()
+        (self.project / '.pvmrc').write_text('99.2')
+        for shell, executable in SHELLS.items():
+            if executable:
+                with self.subTest(shell=shell):
+                    result, _ = self.run_shell(shell, ['cd a', '_pvm_auto_switch', '_pvm_auto_switch', 'invalidate'])
+                    self.assertEqual(result.stderr.count('fake-backend-failure'), 2, result.stderr)
+
+    def test_bash_preserves_previous_status_for_existing_prompt(self):
+        callback = """printf 'status=%s\\n' "$?" """
+        import shlex
+        scalar = shlex.quote(callback)
+        for assignment, invoke in [
+            (scalar, 'eval "$PROMPT_COMMAND"'),
+            ('(' + scalar + ')', 'eval "${PROMPT_COMMAND[0]};${PROMPT_COMMAND[1]}"'),
+        ]:
+            result, _ = self.run_shell('bash', [
+                'PROMPT_COMMAND=' + assignment, 'reload',
+                'false', invoke,
+            ])
+            self.assertEqual(result.stdout.strip(), 'status=1')
+
     def test_reload_is_idempotent(self):
         self.each_shell(['reload', 'cd a', 'cd b'], 1)
 
 
 class PtyTests(unittest.TestCase):
-    def run_pty(self, keys, arguments=('use',), columns=100, prompt=b'Select global PHP', stdout_terminal=False):
+    def run_pty(self, keys, arguments=('use',), columns=100, prompt=b'Select global PHP', stdout_terminal=False, no_color=True, aliases=None):
         with tempfile.TemporaryDirectory(prefix='pvm-pty-') as directory:
             root = Path(directory)
             (root / 'bin').mkdir()
             php = root / 'bin/php'
             php.write_text("#!/bin/sh\nprintf 'PHP 99.1.2 (cli)\\n'\n")
             php.chmod(0o755)
+            if aliases is not None:
+                (root / '.pvm').mkdir()
+                (root / '.pvm/aliases.json').write_text(json.dumps(aliases))
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, columns, 0, 0))
             before = termios.tcgetattr(slave)
@@ -162,6 +217,8 @@ class PtyTests(unittest.TestCase):
                 os.setsid()
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
             env = dict(os.environ, HOME=str(root), PATH=str(root / 'bin'), TERM='xterm', NO_COLOR='1')
+            if not no_color:
+                env.pop('NO_COLOR', None)
             marker = root / 'finished'
             launcher = "import os,subprocess,sys,time; code=subprocess.call(sys.argv[2:]); open(sys.argv[1],'w').write(str(code)); exec(\"while not os.path.exists(sys.argv[1]+'.ack'): time.sleep(.01)\"); sys.exit(code)"
             process = subprocess.Popen([sys.executable, '-c', launcher, str(marker), BINARY, *arguments], cwd=root, env=env, stdin=slave, stderr=slave, stdout=slave if stdout_terminal else subprocess.PIPE, preexec_fn=setup)
@@ -229,9 +286,26 @@ class PtyTests(unittest.TestCase):
     def test_narrow_list_uses_stacked_layout(self):
         code, stdout, terminal = self.run_pty(b'', ('list', '--color', 'never'), columns=60, stdout_terminal=True)
         self.assertEqual(code, 0, terminal)
-        self.assertIn(b'99.1  active', terminal)
+        self.assertIn('● 99.1 [active]'.encode(), terminal)
         self.assertNotIn(b'VERSION', terminal)
         self.assertNotIn(b'\x1b[', terminal)
+
+    def test_wide_list_restores_compact_rows_and_automatic_colors(self):
+        code, stdout, terminal = self.run_pty(
+            b'', ('list',), columns=100, stdout_terminal=True,
+            no_color=False, aliases={'default': '99.1'},
+        )
+        self.assertEqual(code, 0, terminal)
+        self.assertIn(b'PHP Versions Installed', terminal)
+        self.assertIn('●'.encode(), terminal)
+        self.assertIn(b'[active]', terminal)
+        self.assertIn(b'[default]', terminal)
+        self.assertIn(b'Aliases:', terminal)
+        self.assertRegex(terminal, rb'\x1b\[(?:1;)?32m')
+        self.assertIn(b'\x1b[36m', terminal)
+        self.assertIn(b'\x1b[2m', terminal)
+        self.assertNotIn(b'+---', terminal)
+        self.assertNotIn(b'VERSION\tSTATUS', terminal)
 
 
 if __name__ == '__main__':

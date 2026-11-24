@@ -352,3 +352,20 @@ fn explicit_help_color_and_completion_contracts() {
         assert!(text.contains("json"));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn discovers_future_release_names_in_path() {
+    let f = Fixture::new();
+    for name in ["php99.8", "php998"] {
+        let path = f.executable(name, "echo 'PHP 99.8.1'");
+        f.cmd()
+            .args(["which", "99.8"])
+            .assert()
+            .success()
+            .stdout(format!("{}\n", path.display()));
+        fs::remove_file(path).unwrap();
+    }
+    f.executable("php99.8-config", "echo 'PHP 99.8.1'");
+    f.cmd().args(["which", "99.8"]).assert().failure();
+}

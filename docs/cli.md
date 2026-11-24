@@ -52,8 +52,10 @@ An explicit `--restart` also applies when the requested PHP is already active.
 PVM verifies PHP resolved through PATH after an actual switch. It reports CLI,
 Apache, and restart outcomes separately. A post-switch failure returns status 1
 and states that PHP is already active; no automatic rollback is attempted. Apache
-configuration changes occur only during an actual explicit `use`; `auto` never
-updates Apache. Apache is not restarted if its configuration update failed.
+configuration updates run during an explicit switch. If an update fails, repeat
+`pvm use <version>` after fixing the cause. PVM retries the pending update before
+any requested restart, even when that PHP is already active. Automatic switches
+leave Apache configuration alone. PVM skips the Apache restart if its update fails.
 
 ## Running commands
 
@@ -74,7 +76,10 @@ Normal command data goes to stdout. Prompts, switching status, errors, and verbo
 diagnostics go to stderr. `which` prints only a binary path. `current --short`
 prints only the major/minor release line. Redirected `list` output is an unwrapped,
 tab-separated table with VERSION, STATUS, ALIASES, PATH columns. Interactive lists
-use a table at widths of at least 80 columns and a stacked layout below 80.
+use compact rows with a green active dot, bold versions, dimmed paths, alias tags,
+and a cyan alias summary. Below 80 columns, paths move to the next line.
+Redirected empty lists still include the column header.
+`--color always` also applies accents to redirected rows.
 
 `--color auto|always|never` applies to each stream. Explicit always/never overrides
 `NO_COLOR`; auto disables color when `NO_COLOR` is present or that stream is not a
@@ -125,6 +130,10 @@ status 2. `--verbose` may add diagnostics to stderr without changing JSON stdout
 
 ## Configuration
 
+PVM stores aliases in `~/.pvm/aliases.json` (for example, `{"default": "8.3"}`)
+and settings in `~/.pvm/config.json`. Use `pvm alias` and `pvm config` to update
+them so running shell integrations pick up the changes.
+
 ```sh
 pvm config get
 pvm config get restart_webserver
@@ -142,8 +151,19 @@ silently replaced by defaults. `auto_switch` controls directory hooks; explicit
 ## Upgrading shell integration
 
 **Reload your integration after upgrading PVM.** Bash and Zsh users can restart
-their shell, or evaluate `pvm init --shell bash|zsh` for the appropriate shell.
-Fish users must regenerate their saved script and restart/source it:
+their shell after adding the corresponding line to their startup file:
+
+```sh
+# ~/.bashrc
+eval "$(pvm init --shell bash)"
+```
+
+```sh
+# ~/.zshrc
+eval "$(pvm init --shell zsh)"
+```
+
+For Fish, run the following commands on first setup and after each upgrade:
 
 ```fish
 mkdir -p ~/.config/fish/conf.d
@@ -154,18 +174,20 @@ source ~/.config/fish/conf.d/pvm.fish
 Caches are shell-local and compare the version file's path and trimmed contents
 with a shared generation token. Same-user PVM switches and alias/config updates
 invalidate the token. Reads and cached directory changes use shell builtins and
-start no PVM process. Empty/unversioned directories leave PHP unchanged.
+start no PVM process. Hooks activate the file selected from the shell’s working
+directory, including through directory symlinks. Empty/unversioned directories leave PHP unchanged.
 
 Activation errors are shown once per source file, requested value, and generation
 token. Failed activations retry on later hook invocations; successful recovery
-clears the warning state. Hooks return success to avoid interrupting `cd` or
-shells using `set -e`. They do not report activation success after a failure.
+clears the warning state. Bash preserves the previous command’s exit status for
+prompt callbacks.
 
 Changes made directly by Homebrew, another tool, or another user require an
 explicit `pvm auto` or `pvm use` to resynchronize. Locking and invalidation apply
 to operations sharing the same user state directory, not to external managers.
 
-New internal state files under `~/.pvm/` are `switch.lock` and `hook-state`.
+Internal state files under `~/.pvm/` include `switch.lock`, `hook-state`, and a
+temporary `pending-apache` marker for explicit updates.
 State writes are atomic; a shared lock serializes switches and state mutations.
 Directory hooks never wait for that lock: they report contention and retry later.
 The hidden `auto --hook` protocol is internal to matching binary/hook versions;

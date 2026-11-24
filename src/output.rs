@@ -104,28 +104,15 @@ pub fn rule() {
     );
 }
 
-pub fn list(versions: &[VersionRecord], aliases: &crate::aliases::Aliases) {
+pub fn list(versions: &[VersionRecord], aliases: &crate::aliases::Aliases) -> Result<()> {
+    if !std::io::stdout().is_terminal() {
+        write_list_rows(&mut std::io::stdout().lock(), versions)?;
+        return Ok(());
+    }
     if versions.is_empty() {
         println!("{}", style("No PHP versions found.", "33", false));
         println!("Install PHP using Homebrew or your package manager.");
-        return;
-    }
-    if !std::io::stdout().is_terminal() {
-        println!("VERSION\tSTATUS\tALIASES\tPATH");
-        for v in versions {
-            println!(
-                "{}\t{}\t{}\t{}",
-                style(&v.version, "1", false),
-                style(
-                    if v.active { "active" } else { "inactive" },
-                    if v.active { "32" } else { "2" },
-                    false
-                ),
-                style(&v.aliases.join(","), "36", false),
-                style(&v.path, "2", false),
-            );
-        }
-        return;
+        return Ok(());
     }
     let narrow = dialoguer::console::Term::stdout().size().1 < 80;
     println!(
@@ -173,5 +160,37 @@ pub fn list(versions: &[VersionRecord], aliases: &crate::aliases::Aliases) {
             .map(|(name, version)| format!("{} → {version}", style(name, "36", false)))
             .collect::<Vec<_>>();
         println!("Aliases: {}", aliases.join(" | "));
+    }
+    Ok(())
+}
+fn write_list_rows(
+    out: &mut impl std::io::Write,
+    versions: &[VersionRecord],
+) -> std::io::Result<()> {
+    writeln!(out, "VERSION\tSTATUS\tALIASES\tPATH")?;
+    for v in versions {
+        writeln!(
+            out,
+            "{}\t{}\t{}\t{}",
+            style(&v.version, "1", false),
+            style(
+                if v.active { "active" } else { "inactive" },
+                if v.active { "32" } else { "2" },
+                false
+            ),
+            style(&v.aliases.join(","), "36", false),
+            style(&v.path, "2", false),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn empty_redirected_list_is_a_header_only_table() {
+        let mut output = Vec::new();
+        super::write_list_rows(&mut output, &[]).unwrap();
+        assert_eq!(output, b"VERSION\tSTATUS\tALIASES\tPATH\n");
     }
 }

@@ -112,6 +112,8 @@ pub enum Commands {
         restart: RestartArgs,
         #[arg(long, hide = true)]
         hook: bool,
+        #[arg(long, hide = true, requires = "hook")]
+        hook_source: Option<std::path::PathBuf>,
     },
     /// Print shell integration; reload your shell after upgrading PVM
     Init {

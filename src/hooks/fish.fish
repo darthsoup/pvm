@@ -51,13 +51,13 @@ function _pvm_auto_switch --on-variable PWD
   set -l result
   set -l status_code
   if test "$_PVM_FAILURE[1]" = "$source"; and test "$_PVM_FAILURE[2]" = "$raw_wanted"; and test "$_PVM_FAILURE[3]" = "$token"
-    pvm auto --hook 2>/dev/null | read -a -d \t result
+    pvm auto --hook --hook-source "$source" 2>/dev/null | read -a -d \t result
     set status_code $pipestatus[1]
   else
-    pvm auto --hook | read -a -d \t result
+    pvm auto --hook --hook-source "$source" | read -a -d \t result
     set status_code $pipestatus[1]
   end
-  if test "$status_code" = 0; and test -n "$result[1]"; and test -n "$result[2]"
+  if test "$status_code" = 0; and test -n "$result[1]"; and test -n "$result[2]"; and contains -- "$result[3]" 0 1
     set -g _PVM_CACHE "$result[1]" "$source"
     set -g PVM_PHP_VERSION "$wanted"
     set -e _PVM_FAILURE
@@ -67,6 +67,9 @@ function _pvm_auto_switch --on-variable PWD
   else
     set -e PVM_PHP_VERSION
     set -e _PVM_CACHE
+    if test "$result[3]" = failed; and test -n "$result[1]"
+      set token "$result[1]"
+    end
     set -g _PVM_FAILURE "$source" "$raw_wanted" "$token"
   end
   return 0

@@ -32,9 +32,9 @@ _pvm_auto_switch() {
   fi
   command -v pvm >/dev/null 2>&1 || return 0
   if [[ "${_PVM_FAILURE_SOURCE-}" == "$source" && "${_PVM_FAILURE_WANTED-}" == "$wanted" && "${_PVM_FAILURE_TOKEN-}" == "$token" ]]; then
-    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook 2>/dev/null); then status_code=0; else status_code=1; fi
+    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook --hook-source "$source" 2>/dev/null); then status_code=0; else status_code=1; fi
   else
-    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook); then status_code=0; else status_code=1; fi
+    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook --hook-source "$source"); then status_code=0; else status_code=1; fi
   fi
   # Only a committed activation emits this complete success record. Reading it
   # directly avoids a capture subshell and a second parse of the same line.
@@ -44,6 +44,7 @@ _pvm_auto_switch() {
     unset _PVM_FAILURE_SOURCE _PVM_FAILURE_WANTED _PVM_FAILURE_TOKEN
     if [[ "$changed" == 1 ]]; then printf 'Now using PHP %s (from %s)\n' "$_PVM_RESOLVED" "$source" >&2; fi
   else
+    if [[ "${changed-}" == failed && -n "${result_token-}" ]]; then token="$result_token"; fi
     unset PVM_PHP_VERSION _PVM_SOURCE _PVM_TOKEN
     typeset -g _PVM_FAILURE_SOURCE="$source" _PVM_FAILURE_WANTED="$wanted" _PVM_FAILURE_TOKEN="$token"
   fi

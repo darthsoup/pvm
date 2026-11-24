@@ -118,7 +118,8 @@ fn dispatch(cli: Cli) -> Result<i32> {
             silent_if_unchanged,
             restart,
             hook,
-        }) => cmd_auto(silent, silent_if_unchanged, restart, hook)?,
+            hook_source,
+        }) => cmd_auto(silent, silent_if_unchanged, restart, hook, hook_source)?,
         Some(Commands::Exec { version, args }) => switcher::exec_version(&version, &args, false)?,
         Some(Commands::Run { version, command }) => {
             switcher::exec_version(&version, &command, true)?
@@ -160,7 +161,7 @@ fn cmd_list(json_output: bool) -> Result<()> {
     if json_output {
         output::json("list", json!({"versions": versions}), None)?;
     } else {
-        output::list(&versions, &aliases);
+        output::list(&versions, &aliases)?;
     }
     Ok(())
 }
@@ -367,9 +368,21 @@ fn cmd_pin(version: Option<&str>, force: bool) -> Result<()> {
     );
     Ok(())
 }
-fn cmd_auto(silent: bool, unchanged: bool, restart: RestartArgs, hook: bool) -> Result<()> {
-    let cwd = std::env::current_dir().context("Cannot determine current directory")?;
-    let Some(path) = pvmrc::find_pvmrc(&cwd) else {
+fn cmd_auto(
+    silent: bool,
+    unchanged: bool,
+    restart: RestartArgs,
+    hook: bool,
+    hook_source: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let token_protocol = hook_source.is_some();
+    let path = match hook_source {
+        Some(path) => Some(path),
+        None => pvmrc::find_pvmrc(
+            &std::env::current_dir().context("Cannot determine current directory")?,
+        ),
+    };
+    let Some(path) = path else {
         if !silent && !unchanged && !hook {
             eprintln!("No version file (.pvmrc, .php-version, .pvm) found. Use pvm pin 8.3");
         }
@@ -391,6 +404,13 @@ fn cmd_auto(silent: bool, unchanged: bool, restart: RestartArgs, hook: bool) -> 
             quiet: silent,
         },
     )
+    .inspect_err(|error| {
+        if token_protocol
+            && let Some(generation) = error.downcast_ref::<switcher::HookFailureToken>()
+        {
+            println!("{}\t-\tfailed", generation.0);
+        }
+    })
     .with_context(|| format!("Activation from {} failed", path.display()))?;
     if hook {
         println!(

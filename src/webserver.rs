@@ -234,6 +234,15 @@ fn update_apache_config_file(path: &Path, php_version: &str) -> Result<()> {
                 "No Apache module found for PHP {php_version}; existing configuration retained"
             )
         })?;
+    let directive = format!("LoadModule php_module {module}");
+    if content
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("LoadModule php"))
+        .eq([directive.as_str()])
+    {
+        return Ok(());
+    }
     let backup = {
         let mut b = path.to_path_buf();
         b.set_extension("conf.pvm.bak");
@@ -256,7 +265,6 @@ fn update_apache_config_file(path: &Path, php_version: &str) -> Result<()> {
     }
 
     {
-        let new_line = format!("LoadModule php_module {}", module);
         // Insert after the last commented-out LoadModule php line so the
         // directive stays grouped with existing PHP module lines
         let insert_at = lines
@@ -264,7 +272,7 @@ fn update_apache_config_file(path: &Path, php_version: &str) -> Result<()> {
             .rposition(|l| l.contains("LoadModule php"))
             .map(|i| i + 1)
             .unwrap_or(lines.len());
-        lines.insert(insert_at, new_line);
+        lines.insert(insert_at, directive);
     }
 
     let new_content = lines.join("\n");

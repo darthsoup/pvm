@@ -39,7 +39,7 @@ trait SwitchBackend {
     fn versions(&self) -> Vec<PhpVersion>;
     fn switch(&self, target: &PhpVersion, all: &[PhpVersion], hook: bool) -> Result<()>;
     fn verify(&self) -> Result<(String, PathBuf)>;
-    fn apache(&self, version: &str) -> Result<()>;
+    fn apache(&self, version: &str, changed: bool) -> Result<bool>;
     fn restart(
         &self,
         args: &RestartArgs,
@@ -64,8 +64,11 @@ impl SwitchBackend for SystemBackend {
             .context("Active PHP could not execute successfully after switching")?;
         Ok((version.version, path))
     }
-    fn apache(&self, version: &str) -> Result<()> {
-        webserver::update_apache_config(version)
+    fn apache(&self, version: &str, changed: bool) -> Result<bool> {
+        let pending = crate::utils::pvm_dir()?.join("pending-apache");
+        reconcile_apache(&pending, version, changed, || {
+            webserver::update_apache_config(version)
+        })
     }
     fn restart(
         &self,
@@ -77,6 +80,28 @@ impl SwitchBackend for SystemBackend {
     }
 }
 
+// Keep a failed explicit update retryable even when the CLI already switched.
+fn reconcile_apache(
+    pending: &Path,
+    version: &str,
+    changed: bool,
+    update: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    if changed {
+        crate::utils::atomic_write(pending, version.as_bytes())?;
+    } else {
+        match std::fs::read_to_string(pending) {
+            Ok(value) if value == version => {}
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    update()?;
+    std::fs::remove_file(pending)?;
+    Ok(true)
+}
+
 pub fn switch_version(version: &str, opts: &SwitchOptions) -> Result<SwitchResult> {
     let _lock = StateLock::acquire_with_output(opts.hook, opts.quiet)?;
     let config = Config::load()?;
@@ -85,19 +110,31 @@ pub fn switch_version(version: &str, opts: &SwitchOptions) -> Result<SwitchResul
     }
     let resolved = resolve_version_or_alias(version, &load_aliases()?)?;
     // Invalidate caches before any system side effect, including failed switches.
-    let token = if opts.hook {
+    let mut attempt_token = if opts.hook {
         state::token(&config)?
     } else {
         state::publish(&config)?
     };
-    let mut result =
-        switch_with_backend(version, &resolved, opts, &config, &SystemBackend, || {
-            state::publish(&config)
-        })?;
+    let result = switch_with_backend(version, &resolved, opts, &config, &SystemBackend, || {
+        attempt_token = state::publish(&config)?;
+        Ok(attempt_token.clone())
+    });
+    let mut result = match result {
+        Err(error) if opts.hook => return Err(error.context(HookFailureToken(attempt_token))),
+        other => other?,
+    };
     if result.token.is_empty() {
-        result.token = token;
+        result.token = attempt_token;
     }
     Ok(result)
+}
+
+#[derive(Debug)]
+pub struct HookFailureToken(pub String);
+impl std::fmt::Display for HookFailureToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Automatic PHP activation failed")
+    }
 }
 
 fn switch_with_backend(
@@ -122,31 +159,29 @@ fn switch_with_backend(
         && version == resolved
     {
         result.binary_path = path;
-        if opts.restart.restart && !opts.hook {
-            collect_restarts(&mut result, opts, config, backend)?;
+    } else {
+        let versions = backend.versions();
+        let target = find_target(&versions, resolved)?;
+        result.token = invalidate()?;
+        backend
+            .switch(target, &versions, opts.hook)
+            .context("PHP switching failed; system selection may have changed")?;
+        let (actual, path) = backend
+            .verify()
+            .context("Switch verification failed; system selection may have changed")?;
+        if actual != resolved {
+            bail!(
+                "Requested PHP {resolved}, but PATH resolves to PHP {actual} ({}). System selection may have changed; check PATH with pvm doctor",
+                path.display()
+            );
         }
-        return Ok(result);
+        result.changed = true;
+        result.binary_path = path;
     }
-    let versions = backend.versions();
-    let target = find_target(&versions, resolved)?;
-    result.token = invalidate()?;
-    backend
-        .switch(target, &versions, opts.hook)
-        .context("PHP switching failed; system selection may have changed")?;
-    let (actual, path) = backend
-        .verify()
-        .context("Switch verification failed; system selection may have changed")?;
-    if actual != resolved {
-        bail!(
-            "Requested PHP {resolved}, but PATH resolves to PHP {actual} ({}). System selection may have changed; check PATH with pvm doctor",
-            path.display()
-        );
-    }
-    result.changed = true;
-    result.binary_path = path;
     if opts.update_apache && !opts.hook {
-        match backend.apache(resolved) {
-            Ok(()) => result.apache = "checked".into(),
+        match backend.apache(resolved, result.changed) {
+            Ok(false) => {}
+            Ok(true) => result.apache = "checked".into(),
             Err(error) => {
                 result.apache = "failed".into();
                 result
@@ -155,7 +190,7 @@ fn switch_with_backend(
             }
         }
     }
-    if !opts.hook {
+    if !opts.hook && (result.changed || opts.restart.restart) {
         collect_restarts(&mut result, opts, config, backend)?;
     }
 
@@ -212,56 +247,45 @@ pub fn find_target<'a>(versions: &'a [PhpVersion], version: &str) -> Result<&'a 
 }
 #[cfg(target_os = "macos")]
 fn do_switch(target: &PhpVersion, all: &[PhpVersion], hook: bool) -> Result<()> {
-    if which::which("brew").is_ok() {
-        crate::output::verbose("Switch backend: Homebrew");
-        if let Some(active) = all.iter().find(|v| v.active && v.version != target.version) {
-            let _ = checked_output(
-                Command::new("brew").args(["unlink", &format!("php@{}", active.version)]),
-            );
-            let _ = checked_output(Command::new("brew").args(["unlink", "php"]));
-        }
-        let brew = which::which("brew")?;
-        let unversioned = brew
-            .parent()
-            .and_then(Path::parent)
-            .map(|prefix| prefix.join("opt/php/bin/php"));
-        return link_homebrew(
-            &target.version,
-            || {
-                unversioned
-                    .as_deref()
-                    .and_then(detector::probe_php_binary)
-                    .map(|v| v.version)
-            },
-            |formula| {
-                checked_output(Command::new("brew").args([
-                    "link",
-                    "--overwrite",
-                    "--force",
-                    formula,
-                ]))
-                .map(|_| ())
-            },
-        );
-    }
-    update_symlink(&target.binary_path, hook)
+    let Ok(brew) = which::which("brew") else {
+        return update_symlink(&target.binary_path, hook);
+    };
+    switch_homebrew(&brew, target, all)
 }
-#[cfg(any(target_os = "macos", test))]
-fn link_homebrew(
-    requested: &str,
-    unversioned_version: impl FnOnce() -> Option<String>,
-    mut link: impl FnMut(&str) -> Result<()>,
-) -> Result<()> {
-    match link(&format!("php@{requested}")) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            if unversioned_version().as_deref() == Some(requested) {
-                link("php").with_context(|| format!("Versioned formula also failed: {error:#}"))
-            } else {
-                Err(error)
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn switch_homebrew(brew: &Path, target: &PhpVersion, all: &[PhpVersion]) -> Result<()> {
+    crate::output::verbose("Switch backend: Homebrew");
+    let prefix_output = checked_output(Command::new(brew).arg("--prefix"))?;
+    let prefix = Path::new(std::str::from_utf8(&prefix_output.stdout)?.trim());
+    anyhow::ensure!(prefix.is_absolute(), "Homebrew returned an invalid prefix");
+    let owner = |php: &PhpVersion| -> Option<String> {
+        let binary = php.binary_path.canonicalize().ok()?;
+        for formula in [format!("php@{}", php.version), String::from("php")] {
+            let installed = prefix.join("opt").join(&formula).join("bin/php");
+            if installed.canonicalize().ok().as_ref() == Some(&binary) {
+                return Some(formula);
             }
         }
+        None
+    };
+    let formula = owner(target).with_context(|| format!(
+        "PHP {} ({}) is not provided by this Homebrew installation. Use pvm exec or adjust PATH",
+        target.version, target.binary_path.display()
+    ))?;
+    let binary = prefix.join("opt").join(&formula).join("bin/php");
+    anyhow::ensure!(
+        detector::probe_php_binary(&binary).is_some_and(|php| php.version == target.version),
+        "Homebrew formula {formula} does not provide usable PHP {}",
+        target.version
+    );
+    if let Some(active) = all.iter().find(|php| php.active).and_then(owner)
+        && active != formula
+    {
+        checked_output(Command::new(brew).args(["unlink", &active]))?;
     }
+    checked_output(Command::new(brew).args(["link", "--overwrite", "--force", &formula]))?;
+    Ok(())
 }
 #[cfg(target_os = "linux")]
 fn do_switch(target: &PhpVersion, _all: &[PhpVersion], hook: bool) -> Result<()> {
@@ -410,13 +434,18 @@ pub fn exec_version(version: &str, args: &[OsString], run: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Default)]
     struct Fake {
         actual: &'static str,
         apache_error: bool,
+        pending: Option<PathBuf>,
+        active: bool,
+        apache_skipped: std::cell::Cell<bool>,
     }
     impl SwitchBackend for Fake {
         fn quick_active(&self) -> Option<(String, PathBuf)> {
-            None
+            self.active
+                .then(|| (self.actual.into(), "/fake/php".into()))
         }
         fn versions(&self) -> Vec<PhpVersion> {
             vec![PhpVersion {
@@ -432,49 +461,24 @@ mod tests {
         fn verify(&self) -> Result<(String, PathBuf)> {
             Ok((self.actual.into(), "/fake/php".into()))
         }
-        fn apache(&self, _: &str) -> Result<()> {
-            if self.apache_error {
-                bail!("permission denied");
+        fn apache(&self, version: &str, changed: bool) -> Result<bool> {
+            let update = || {
+                if self.apache_error {
+                    bail!("permission denied");
+                }
+                Ok(())
+            };
+            if let Some(path) = &self.pending {
+                reconcile_apache(path, version, changed, update)
+            } else {
+                update().map(|_| true)
             }
-            Ok(())
         }
-        fn restart(&self, _: &RestartArgs, _: &Config, _: bool) -> Result<Vec<RestartOutcome>> {
+        fn restart(&self, args: &RestartArgs, _: &Config, _: bool) -> Result<Vec<RestartOutcome>> {
+            self.apache_skipped
+                .set(args.skip.contains(&webserver::WebServer::Apache));
             Ok(vec![])
         }
-    }
-    #[test]
-    fn homebrew_fallback_requires_the_requested_release_line() {
-        let mut calls = Vec::new();
-        let result = link_homebrew(
-            "8.3",
-            || Some("8.4".into()),
-            |formula| {
-                calls.push(formula.to_owned());
-                bail!("link failed: permission denied")
-            },
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("permission denied")
-        );
-        assert_eq!(calls, ["php@8.3"]);
-        calls.clear();
-        let result = link_homebrew(
-            "8.3",
-            || Some("8.3".into()),
-            |formula| {
-                calls.push(formula.to_owned());
-                if formula == "php" {
-                    Ok(())
-                } else {
-                    bail!("versioned formula missing")
-                }
-            },
-        );
-        assert!(result.is_ok());
-        assert_eq!(calls, ["php@8.3", "php"]);
     }
     #[test]
     fn rejects_wrong_php_after_successful_backend_operation() {
@@ -485,7 +489,7 @@ mod tests {
             &Config::default(),
             &Fake {
                 actual: "8.4",
-                apache_error: false,
+                ..Default::default()
             },
             || Ok("token".into()),
         )
@@ -493,10 +497,99 @@ mod tests {
         assert!(error.to_string().contains("PATH resolves to PHP 8.4"));
     }
     #[test]
+    fn failed_apache_update_is_retried_before_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = Fake {
+            actual: "8.3",
+            apache_error: true,
+            pending: Some(dir.path().join("pending")),
+            ..Default::default()
+        };
+        let opts = SwitchOptions {
+            update_apache: true,
+            restart: RestartArgs {
+                restart: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let run = |backend: &Fake| {
+            switch_with_backend("8.3", "8.3", &opts, &Config::default(), backend, || {
+                Ok("token".into())
+            })
+            .unwrap()
+        };
+        assert_eq!(run(&backend).apache, "failed");
+        assert!(backend.apache_skipped.get());
+        backend.active = true;
+        assert_eq!(run(&backend).apache, "failed");
+        assert!(backend.apache_skipped.get());
+        backend.apache_error = false;
+        let retry = run(&backend);
+        assert_eq!(retry.apache, "checked");
+        assert!(!retry.changed);
+        assert!(!backend.apache_skipped.get());
+        assert_eq!(run(&backend).apache, "skipped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn homebrew_preflights_target_before_unlinking_active_php() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let executable = |path: &Path, script: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let brew = root.join("brew");
+        executable(
+            &brew,
+            r#"prefix=${0%/*}
+if [ "$1" = --prefix ]; then echo "$prefix"; else echo "$*" >> "$prefix/calls"; fi"#,
+        );
+        let active = PhpVersion {
+            version: "8.4".into(),
+            full_version: "8.4.1".into(),
+            binary_path: root.join("opt/php/bin/php"),
+            active: true,
+        };
+        executable(&active.binary_path, "echo 'PHP 8.4.1'");
+        let mut target = PhpVersion {
+            version: "8.3".into(),
+            full_version: "8.3.1".into(),
+            binary_path: root.join("custom/php"),
+            active: false,
+        };
+        executable(&target.binary_path, "echo 'PHP 8.3.1'");
+        let installed = [active];
+        assert!(switch_homebrew(&brew, &target, &installed).is_err());
+        target.binary_path = root.join("opt/php@8.3/bin/php");
+        executable(&target.binary_path, "echo 'PHP 8.4.1'");
+        assert!(switch_homebrew(&brew, &target, &installed).is_err());
+        let log = root.join("calls");
+        assert!(!log.exists());
+        executable(&target.binary_path, "echo 'PHP 8.3.1'");
+        switch_homebrew(&brew, &target, &installed).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "unlink php\nlink --overwrite --force php@8.3\n"
+        );
+        switch_homebrew(&brew, &installed[0], &[]).unwrap();
+        assert!(
+            std::fs::read_to_string(log)
+                .unwrap()
+                .ends_with("link --overwrite --force php\n")
+        );
+    }
+
+    #[test]
     fn reports_partial_success_and_hooks_skip_apache() {
         let backend = Fake {
             actual: "8.3",
             apache_error: true,
+            ..Default::default()
         };
         let mut opts = SwitchOptions {
             update_apache: true,

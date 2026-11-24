@@ -1,13 +1,14 @@
 # PVM shell integration (bash). Reload this script after upgrading PVM.
 # Add: eval "$(pvm init --shell bash)" to ~/.bashrc
 _pvm_auto_switch() {
+  local previous_status=$?
   local token="" enabled=1 dir="$PWD" wanted="" source="" f result_token result_version changed status_code
   if [[ -r "$HOME/.pvm/hook-state" ]]; then
     IFS=$'\t' read -r token enabled < "$HOME/.pvm/hook-state" || :
   fi
   if [[ "$enabled" == 0 ]]; then
     unset PVM_PHP_VERSION _PVM_SOURCE _PVM_TOKEN
-    return 0
+    return "$previous_status"
   fi
   while true; do
     for f in .pvmrc .php-version .pvm; do
@@ -25,16 +26,16 @@ _pvm_auto_switch() {
   wanted="${wanted%"${wanted##*[![:space:]]}"}"
   if [[ -z "$wanted" ]]; then
     unset PVM_PHP_VERSION _PVM_SOURCE _PVM_TOKEN _PVM_FAILURE_SOURCE _PVM_FAILURE_WANTED _PVM_FAILURE_TOKEN
-    return 0
+    return "$previous_status"
   fi
   if [[ -n "$token" && "${PVM_PHP_VERSION-}" == "$wanted" && "${_PVM_SOURCE-}" == "$source" && "${_PVM_TOKEN-}" == "$token" ]]; then
-    return 0
+    return "$previous_status"
   fi
-  command -v pvm >/dev/null 2>&1 || return 0
+  command -v pvm >/dev/null 2>&1 || return "$previous_status"
   if [[ "${_PVM_FAILURE_SOURCE-}" == "$source" && "${_PVM_FAILURE_WANTED-}" == "$wanted" && "${_PVM_FAILURE_TOKEN-}" == "$token" ]]; then
-    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook 2>/dev/null); then status_code=0; else status_code=1; fi
+    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook --hook-source "$source" 2>/dev/null); then status_code=0; else status_code=1; fi
   else
-    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook); then status_code=0; else status_code=1; fi
+    if IFS=$'\t' read -r result_token result_version changed < <(exec pvm auto --hook --hook-source "$source"); then status_code=0; else status_code=1; fi
   fi
   # Only a committed activation emits this complete success record. Reading it
   # directly avoids a capture subshell and a second parse of the same line.
@@ -45,10 +46,11 @@ _pvm_auto_switch() {
     unset _PVM_FAILURE_SOURCE _PVM_FAILURE_WANTED _PVM_FAILURE_TOKEN
     if [[ "$changed" == 1 ]]; then printf 'Now using PHP %s (from %s)\n' "$_PVM_RESOLVED" "$source" >&2; fi
   else
+    if [[ "${changed-}" == failed && -n "${result_token-}" ]]; then token="$result_token"; fi
     unset PVM_PHP_VERSION _PVM_SOURCE _PVM_TOKEN
     _PVM_FAILURE_SOURCE="$source" _PVM_FAILURE_WANTED="$wanted" _PVM_FAILURE_TOKEN="$token"
   fi
-  return 0
+  return "$previous_status"
 }
 unset PVM_PHP_VERSION _PVM_SOURCE _PVM_TOKEN _PVM_FAILURE_SOURCE _PVM_FAILURE_WANTED _PVM_FAILURE_TOKEN
 # Preserve both scalar and array PROMPT_COMMAND values and avoid duplicate hooks.

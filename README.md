@@ -1,74 +1,42 @@
 # pvm — PHP Version Manager
 
-A cross-platform PHP version manager for **macOS** and **Linux**, written in Rust.
-Inspired by nvm and fvm — automatically switches PHP versions when you enter a project directory.
+Switch between installed PHP versions on macOS and Linux, or pin a version for a project. Switching is global and can affect other terminals. Use `pvm exec` or `pvm run` when only one command needs a different PHP version.
 
 ## Install
 
-```sh
-cargo build --release
-sudo cp target/release/pvm /usr/local/bin/pvm
-```
-
-**Shell integration** — add to `~/.zshrc` or `~/.bashrc` for auto-switching on `cd`:
+From a checkout of this repository, install PVM with a current stable Rust toolchain.
 
 ```sh
-eval "$(pvm init)"
+cargo install --path . --locked
+pvm --version
 ```
 
-For fish, save once:
+Cargo installs to `~/.cargo/bin` by default. Make sure that directory is on your `PATH`.
+
+## Everyday use
 
 ```sh
-pvm init --shell fish > ~/.config/fish/conf.d/pvm.fish
+pvm list                     # See installed versions and the active one
+pvm use 8.3                  # Switch to the installed 8.3 release line
+pvm use                      # Choose interactively
+pvm current --short          # Print the active release line
+pvm exec 8.2 -- php -v       # Use PHP 8.2 for one command
+pvm doctor                   # Diagnose PATH and configuration issues
 ```
 
-## Auto-switching
+## Pin a project
 
-pvm automatically activates the correct PHP version when you `cd` into a project — no manual `pvm use` needed.
-
-**Step 1:** Pin a version in your project:
+Run these commands in the project directory. Commit `.pvmrc` to share the pin with your team.
 
 ```sh
-cd ~/my-project
-pvm pin 8.2          # writes .pvmrc with "8.2"
+pvm pin 8.3                  # Write .pvmrc
+pvm auto                     # Activate the project pin
 ```
 
-**Step 2:** That's it. Next time you `cd` into the project, pvm switches PHP automatically.
+To switch automatically when you enter a project, add `eval "$(pvm init --shell zsh)"` to `~/.zshrc`, or `eval "$(pvm init --shell bash)"` to `~/.bashrc`, then restart your shell. Fish users can follow the [Fish setup instructions](docs/cli.md#upgrading-shell-integration). **Reload the integration after upgrading PVM.**
 
-Supported version files (searched from cwd upwards):
-- `.pvmrc`
-- `.php-version`
-- `.pvm`
+## More information
 
-You can also trigger the switch manually:
-
-```sh
-pvm auto             # read version file and switch
-```
-
-## Usage
-
-```sh
-pvm list                    # list installed PHP versions
-pvm use 8.3                 # switch global PHP
-pvm use                     # interactive picker
-pvm pin 8.1                 # write .pvmrc in current directory
-pvm exec 8.1 -- php artisan migrate   # run command with specific version (no global switch)
-pvm alias default 8.3       # create a named alias
-pvm info 8.3                # show binary path, php.ini, extensions
-pvm doctor                  # diagnose PATH/symlink/config issues
-```
-
-Run `pvm --help` or `pvm <command> --help` for full options.
-
-## State
-
-```
-~/.pvm/
-├── aliases.json   # { "default": "8.3", "legacy": "7.4" }
-└── config.json    # { "restart_webserver": "ask" }   (ask | always | never)
-```
-
-## License
-
-MIT
+- [CLI guide](docs/cli.md) — aliases, pin replacement, shell setup, configuration, JSON output, and exit codes. For help in the terminal, run `pvm <command> --help`.
+- [Benchmark guide](docs/benchmarks.md) — measure hook, discovery, and startup performance.
+- [MIT license](LICENSE.md)

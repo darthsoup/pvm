@@ -219,31 +219,49 @@ fn scan_linux_paths() -> Vec<PathBuf> {
     paths
 }
 
-#[cfg(target_os = "linux")]
 fn is_php_versioned_name(name: &str) -> bool {
-    // Exclude "phpize", "php-config", etc. — only match "php8.3", "php7.4" …
-    name[3..].starts_with(|c: char| c.is_ascii_digit())
+    #[cfg(windows)]
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    let Some(version) = name.strip_prefix("php") else {
+        return false;
+    };
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let dotted = version.strip_prefix(['@', '-']).unwrap_or(version);
+    match dotted.split_once('.') {
+        Some((major, minor)) => digits(major) && digits(minor),
+        None => version.len() >= 2 && digits(version),
+    }
 }
 
 fn scan_path_binaries() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    if let Ok(p) = which::which("php") {
-        paths.push(p);
-    }
-
-    let known_versions = [
-        "5.6", "7.0", "7.1", "7.2", "7.3", "7.4", "8.0", "8.1", "8.2", "8.3", "8.4",
-    ];
-    for ver in &known_versions {
-        if let Ok(p) = which::which(format!("php{}", ver)) {
-            paths.push(p);
+    let mut paths: Vec<_> = which::which("php").into_iter().collect();
+    let mut seen = HashSet::new();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for dir in std::env::split_paths(&path) {
+        if !seen.insert(dir.clone()) {
+            continue;
         }
-        if let Ok(p) = which::which(format!("php{}", ver.replace('.', ""))) {
-            paths.push(p);
-        }
+        let Ok(entries) = std::fs::read_dir(if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            &dir
+        }) else {
+            continue;
+        };
+        let mut matches: Vec<_> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(is_php_versioned_name)
+            })
+            .filter_map(|entry| std::path::absolute(entry.path()).ok())
+            .filter_map(|path| which::which(path).ok())
+            .collect();
+        matches.sort_unstable();
+        paths.extend(matches);
     }
-
     paths
 }
 
