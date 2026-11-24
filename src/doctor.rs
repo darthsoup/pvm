@@ -196,7 +196,7 @@ pub fn inspect() -> Report {
             ),
         }
     }
-    let integration = dirs::home_dir().is_some_and(|home| {
+    let integration = std::env::home_dir().is_some_and(|home| {
         [".zshrc", ".bashrc", ".bash_profile", ".profile"]
             .iter()
             .any(|name| {

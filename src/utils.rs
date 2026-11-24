@@ -5,7 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub fn pvm_dir() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
+    Ok(std::env::home_dir()
         .context("Cannot determine home directory")?
         .join(".pvm"))
 }
